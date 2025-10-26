@@ -66,8 +66,9 @@ class WaveSimulator:
         self.time = 0.0
         self.last_wave_spawn = 0.0
 
-        # Wave spawn area (far from shore)
-        self.spawn_distance = 150.0
+        # Wave spawn area (far from shore, but ON the map)
+        ocean_width, ocean_height = self.ocean_floor.get_dimensions()
+        self.spawn_distance = min(150.0, ocean_height * 0.8)  # Don't spawn off-map!
 
     def step(self, dt: float):
         """
@@ -101,21 +102,36 @@ class WaveSimulator:
         # Random height variation
         height = self.base_height * (1 + np.random.uniform(-self.randomness, self.randomness))
 
-        # Position wave at spawn distance in wave direction
-        dx = np.cos(self.direction) * self.spawn_distance
-        dy = np.sin(self.direction) * self.spawn_distance
-
         ocean_width, ocean_height = self.ocean_floor.get_dimensions()
-        position = np.array([ocean_width / 2 + dx, ocean_height / 2 + dy])
 
-        # Wave speed based on deep water wave theory: c = sqrt(g * L / (2*pi))
-        # Approximation: c ≈ 1.56 * period
-        speed = 1.56 * self.wave_period
+        # Spawn waves at FAR end of ocean (deep water) moving toward shore
+        # Shore is at y=0, deep ocean at y=ocean_height
+        # But keep waves ON the map by spawning closer for small oceans
+        if ocean_height < 100:
+            spawn_y = ocean_height * 0.65  # Closer for small maps
+        else:
+            spawn_y = ocean_height * 0.85  # Far for large maps
+
+        spawn_x = ocean_width / 2  # Center
+
+        # Waves should move TOWARD shore (negative y direction)
+        # Override direction to point toward beach
+        wave_direction = -np.pi / 2  # Pointing toward y=0 (south/toward beach)
+
+        position = np.array([spawn_x, spawn_y])
+
+        # Wave speed - scale based on ocean size to keep waves visible
+        # For small oceans, slow down waves to keep them on-screen longer
+        base_speed = 1.56 * self.wave_period
+        if ocean_height < 100:
+            speed = base_speed * 0.3  # Slower for small maps
+        else:
+            speed = base_speed
 
         wave = Wave(
             position=position,
             height=height,
-            direction=self.direction,
+            direction=wave_direction,  # Use corrected direction toward shore
             speed=speed,
             period=self.wave_period
         )

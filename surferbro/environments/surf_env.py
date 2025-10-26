@@ -163,8 +163,22 @@ class SurfEnvironment(gym.Env):
 
         # Reset components
         ocean_width, ocean_height = self.ocean_floor.get_dimensions()
+
+        # Find a good starting position (shallow water near beach)
         start_x = ocean_width / 2
-        start_y = 10.0  # Start near shore
+        start_y = None
+
+        # Search for shallow water (< 1m depth) to start in
+        for y in range(int(ocean_height)):
+            y_pos = float(y) * 0.5  # Convert grid to meters
+            depth = self.ocean_floor.get_depth(start_x, y_pos)
+            if 0.3 < depth < 1.5:  # Shallow water, good starting point
+                start_y = y_pos
+                break
+
+        # If no shallow water found, start near shore
+        if start_y is None:
+            start_y = min(10.0, ocean_height * 0.2)
 
         self.surfer.reset((start_x, start_y))
         self.jellyfish_swarm.reset()

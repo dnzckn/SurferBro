@@ -10,11 +10,12 @@ print("🏄 ULTRA FAST DEMO - 2 Minutes, NO WAITING!")
 print("="*60)
 print("\nNo evaluation callbacks = No waiting!")
 print("Training: 10,000 steps (~2 minutes)")
+print("\n✨ Using PROPER ocean with beach and depth gradient!")
 print()
 
-# Simple environment
+# Simple environment with PROPER ocean
 env = DummyVecEnv([lambda: SurfEnvironment(
-    ocean_design="ocean_designs/ocean_design_20251026_150514.json"
+    ocean_design="ocean_designs/proper_beach_ocean.json"
 )])
 
 print("Creating SAC agent...")
