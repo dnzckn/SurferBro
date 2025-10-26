@@ -1,0 +1,8 @@
+{
+  "width": 200,
+  "height": 120,
+  "gridSize": 5,
+  "grid": "This is a placeholder example design file. Use OceanScope GUI to create real designs.",
+  "timestamp": "2025-01-01T00:00:00.000Z",
+  "_note": "This is a simplified example. Real designs created with OceanScope will have full grid data."
+}

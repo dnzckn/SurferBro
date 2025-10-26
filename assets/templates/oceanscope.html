@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OceanScope - Beach Designer</title>
+    <link rel="stylesheet" href="/static/css/oceanscope.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🌊 OceanScope - Beach Designer</h1>
+            <p>Design your perfect surf environment</p>
+        </header>
+
+        <div class="toolbar">
+            <div class="tool-group">
+                <button id="sand-tool" class="tool-btn active" data-tool="sand">
+                    🏖️ Sand
+                </button>
+                <button id="ocean-tool" class="tool-btn" data-tool="ocean">
+                    🌊 Ocean
+                </button>
+                <button id="pier-tool" class="tool-btn" data-tool="pier">
+                    🏗️ Pier
+                </button>
+                <button id="erase-tool" class="tool-btn" data-tool="erase">
+                    🗑️ Erase
+                </button>
+            </div>
+
+            <div class="tool-group">
+                <label for="brush-size">Brush Size:</label>
+                <input type="range" id="brush-size" min="1" max="10" value="3">
+                <span id="brush-size-value">3</span>
+            </div>
+
+            <div class="tool-group">
+                <label for="depth-slider">Depth:</label>
+                <input type="range" id="depth-slider" min="0" max="20" value="5" step="0.5">
+                <span id="depth-value">5.0m</span>
+            </div>
+
+            <div class="tool-group">
+                <button id="clear-btn" class="action-btn">🔄 Clear All</button>
+                <button id="export-btn" class="action-btn success">💾 Export Design</button>
+            </div>
+        </div>
+
+        <div class="canvas-container">
+            <canvas id="ocean-canvas" width="1000" height="600"></canvas>
+            <div id="cursor-info"></div>
+        </div>
+
+        <div class="info-panel">
+            <h3>Instructions</h3>
+            <ul>
+                <li><strong>Sand Tool:</strong> Create the beach and shallow areas</li>
+                <li><strong>Ocean Tool:</strong> Define ocean depth (use depth slider)</li>
+                <li><strong>Pier Tool:</strong> Add pier structures</li>
+                <li><strong>Left Click:</strong> Paint terrain</li>
+                <li><strong>Right Click:</strong> Erase</li>
+            </ul>
+
+            <div class="stats">
+                <h3>Design Stats</h3>
+                <p>Cells Painted: <span id="cells-painted">0</span></p>
+                <p>Ocean Depth Range: <span id="depth-range">0m - 0m</span></p>
+                <p>Pier Count: <span id="pier-count">0</span></p>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/oceanscope.js"></script>
+</body>
+</html>
