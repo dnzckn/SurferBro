@@ -1,6 +1,14 @@
-# SurferBro - Reinforcement Learning Surfing Simulator
+<div align="center">
+  <img src="pictures/logo.png" alt="SurferBro Logo" width="400"/>
 
-An advanced reinforcement learning environment where an AI agent learns to surf from complete noob to pro surfer through physical wave simulation and environmental interaction.
+  # SurferBro - Reinforcement Learning Surfing Simulator
+
+  An advanced reinforcement learning environment where an AI agent learns to surf from complete noob to pro surfer through physical wave simulation and environmental interaction.
+
+  [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
+</div>
 
 ## Features
 
