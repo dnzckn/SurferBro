@@ -13,6 +13,7 @@
 ## Features
 
 ### OceanScope - Beach Designer
+<img src="pictures/OceanScope.png" alt="OceanScope Screenshot" width="400"/>
 - Interactive HTML-based GUI for designing your surf environment
 - Place sand beaches with custom topology
 - Define ocean depth and floor contours
