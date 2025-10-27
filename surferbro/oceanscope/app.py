@@ -29,6 +29,29 @@ def export_design():
     try:
         design_data = request.get_json()
 
+        # VALIDATE: Must have sand/beach!
+        has_sand = False
+        has_shallow = False
+
+        for row in design_data['grid']:
+            for cell in row:
+                if cell['type'] == 'sand':
+                    has_sand = True
+                if cell['type'] == 'ocean' and cell['depth'] < 2.0:
+                    has_shallow = True
+
+        if not has_sand and not has_shallow:
+            return jsonify({
+                'success': False,
+                'error': 'Ocean design must have sand (beach) or shallow water! Surfer needs a starting point.'
+            }), 400
+
+        if not has_sand:
+            return jsonify({
+                'success': False,
+                'error': 'Ocean design must have SAND tiles for the beach! Use the Sand tool to create a beach area.'
+            }), 400
+
         # Create ocean_designs directory if it doesn't exist
         designs_dir = Path(__file__).parent.parent.parent / 'ocean_designs'
         designs_dir.mkdir(exist_ok=True)
@@ -45,7 +68,7 @@ def export_design():
         return jsonify({
             'success': True,
             'filename': str(filepath),
-            'message': 'Design exported successfully'
+            'message': 'Design exported successfully! ✓ Has beach for surfer starting point.'
         })
 
     except Exception as e:

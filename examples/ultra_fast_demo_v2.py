@@ -73,7 +73,7 @@ try:
 
         while steps < 500:
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = env.step(action)
+            obs, reward, terminated, truncated, info = render_env.step(action)  # Fixed: use render_env!
             total_reward += reward
             steps += 1
 

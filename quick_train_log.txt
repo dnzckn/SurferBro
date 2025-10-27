@@ -1,0 +1,43 @@
+2025-10-26 20:01:44.008268: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+======================================================================
+🏄 QUICK TRAINING TEST (5k steps, ~1 min)
+======================================================================
+
+Mechanics being tested:
+  • Duck dive (3s duration, blocks movement)
+  • Wave collision (pushback if not diving)
+  • Wave carrying (must wait 1s before standing)
+  • Standing up (must align with wave)
+
+Training...
+
+ 100% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 5,000/5,000  [ 0:00:57 < 0:00:00 , 82 it/s ]
+
+✅ Training complete in 57.3s
+   Steps per second: 87
+
+======================================================================
+TRAINING ANALYSIS
+======================================================================
+
+Episodes completed: 1
+Total timesteps: 5000
+
+Reward progression:
+  First 10 avg: 0.00
+
+Movement (Y position at episode end):
+  First 10 avg: 3.51m
+
+Surfing success:
+  Episodes with surfing: 0/1
+  Success rate: 0.0%
+
+Key Learning Indicators:
+  ⚠️  No surfing yet (needs more training)
+  ✅ Positive learning trend (reward: 0.0)
+
+======================================================================
+Model saved to: quick_train_model.zip
+======================================================================

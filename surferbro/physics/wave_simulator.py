@@ -6,17 +6,112 @@ from dataclasses import dataclass
 from surferbro.physics.ocean_floor import OceanFloor
 
 
+from enum import Enum
+
+class WavePhase(Enum):
+    """Wave lifecycle phases."""
+    BUILDING = "building"    # Wave is forming, growing
+    FRONT = "front"          # Wave front is formed, rideable!
+    WHITEWASH = "whitewash"  # Wave has broken, just foam
+
 @dataclass
 class Wave:
-    """Represents a single wave."""
-    position: np.ndarray  # [x, y] position of wave front
-    height: float  # Wave height in meters
-    direction: float  # Direction in radians
-    speed: float  # Wave speed in m/s
+    """Represents an angled wave front moving toward shore."""
+    front_start: np.ndarray  # [x, y] start point of wave front line
+    front_end: np.ndarray    # [x, y] end point of wave front line
+    height: float  # Current wave height in meters
+    max_height: float  # Maximum height this wave will reach
+    speed: float  # Wave speed in m/s (how fast front advances)
     period: float  # Wave period in seconds
-    is_breaking: bool = False
-    is_whitewash: bool = False
-    whitewash_timer: float = 0.0
+    direction: float  # Direction wave is traveling (in radians)
+    phase: WavePhase = WavePhase.BUILDING
+    phase_timer: float = 0.0  # Time in current phase
+
+    # Phase durations
+    building_duration: float = 2.0  # 2s to build
+    front_duration: float = 3.0  # 3s rideable window
+
+    def get_carry_duration(self) -> float:
+        """
+        Get required carry duration based on wave size.
+
+        Bigger waves require longer carry time (1-3 seconds).
+
+        Returns:
+            Carry duration in seconds
+        """
+        # Map wave height to carry duration
+        # Small waves (0.5m) = 1s, Big waves (3m+) = 3s
+        min_carry = 1.0
+        max_carry = 3.0
+        min_height = 0.5
+        max_height = 3.0
+
+        # Linear interpolation
+        t = (self.max_height - min_height) / (max_height - min_height)
+        t = np.clip(t, 0, 1)
+
+        return min_carry + t * (max_carry - min_carry)
+
+    @property
+    def position(self) -> np.ndarray:
+        """Center position of wave front."""
+        return (self.front_start + self.front_end) / 2
+
+    @property
+    def x_start(self) -> float:
+        """X coordinate of front start (for compatibility)."""
+        return self.front_start[0]
+
+    @property
+    def x_end(self) -> float:
+        """X coordinate of front end (for compatibility)."""
+        return self.front_end[0]
+
+    @property
+    def y_position(self) -> float:
+        """Y coordinate of front center (for compatibility)."""
+        return self.position[1]
+
+    @property
+    def is_breaking(self) -> bool:
+        """Compatibility property."""
+        return self.phase == WavePhase.FRONT
+
+    @property
+    def is_whitewash(self) -> bool:
+        """Compatibility property."""
+        return self.phase == WavePhase.WHITEWASH
+
+    @property
+    def front_angle(self) -> float:
+        """
+        Angle of the wave front LINE (perpendicular to wave direction).
+
+        Returns:
+            Angle in radians of the wave front line
+        """
+        # Wave front is perpendicular to wave direction
+        # If wave travels at angle θ, front line is at θ + 90°
+        return self.direction + np.pi/2
+
+    def get_ideal_catch_angles(self) -> tuple[float, float]:
+        """
+        Get the two ideal angles for catching this wave.
+
+        Surfer should be at 45° to the wave front (perpendicular).
+
+        Returns:
+            (angle1, angle2): Two valid catch angles in radians
+        """
+        # Wave front angle
+        front_angle = self.front_angle
+
+        # Surfer should be at ±45° to the front
+        angle1 = front_angle + np.pi/4  # +45°
+        angle2 = front_angle - np.pi/4  # -45°
+
+        return (angle1, angle2)
 
 
 class WaveSimulator:
@@ -43,6 +138,8 @@ class WaveSimulator:
         """
         Initialize wave simulator.
 
+        Automatically detects beach location and spawns waves from deep water.
+
         Args:
             ocean_floor: OceanFloor instance
             wave_period: Time between waves in seconds
@@ -56,7 +153,6 @@ class WaveSimulator:
         self.ocean_floor = ocean_floor
         self.wave_period = wave_period
         self.base_height = base_height
-        self.direction = np.radians(direction)
         self.pier_positions = pier_positions or []
         self.randomness = randomness
         self.breaking_depth_ratio = breaking_depth_ratio
@@ -66,9 +162,71 @@ class WaveSimulator:
         self.time = 0.0
         self.last_wave_spawn = 0.0
 
-        # Wave spawn area (far from shore, but ON the map)
+        # AUTO-DETECT beach location and wave direction
+        self._detect_beach_and_wave_direction(direction)
+
+    def _detect_beach_and_wave_direction(self, base_direction_deg: float):
+        """
+        Auto-detect where beach is and set wave spawn location/direction.
+
+        Analyzes ocean floor to find shallow water (beach) and deep water,
+        then spawns waves from deep water toward beach.
+
+        Args:
+            base_direction_deg: Base direction in degrees (for angle variation)
+        """
         ocean_width, ocean_height = self.ocean_floor.get_dimensions()
-        self.spawn_distance = min(150.0, ocean_height * 0.8)  # Don't spawn off-map!
+
+        # Sample depths along Y-axis at center X
+        center_x = ocean_width / 2
+        y_samples = 10
+        depths_at_y = []
+
+        for i in range(y_samples):
+            y = (i / (y_samples - 1)) * ocean_height
+            depth = self.ocean_floor.get_depth(center_x, y)
+            depths_at_y.append((y, depth))
+
+        # Find where shallow water is (beach)
+        shallow_y = []
+        deep_y = []
+
+        for y, depth in depths_at_y:
+            if depth < 2.0:  # Shallow = beach
+                shallow_y.append(y)
+            elif depth > 5.0:  # Deep water
+                deep_y.append(y)
+
+        # Determine beach location
+        if shallow_y and deep_y:
+            avg_shallow = np.mean(shallow_y)
+            avg_deep = np.mean(deep_y)
+
+            # Beach is where shallow water is
+            beach_at_bottom = avg_shallow < avg_deep
+
+            if beach_at_bottom:
+                # Beach at low Y (y=0 side)
+                # Waves spawn at high Y, move toward y=0
+                self.spawn_y_ratio = 0.75  # Spawn at 75% of height
+                self.wave_base_direction = -np.pi / 2  # South (-Y direction)
+                print(f"🏖️  Beach detected at BOTTOM (y≈{avg_shallow:.1f}m)")
+                print(f"🌊 Waves will spawn at TOP and move DOWN")
+            else:
+                # Beach at high Y (y=max side)
+                # Waves spawn at low Y, move toward y=max
+                self.spawn_y_ratio = 0.25  # Spawn at 25% of height
+                self.wave_base_direction = np.pi / 2  # North (+Y direction)
+                print(f"🏖️  Beach detected at TOP (y≈{avg_shallow:.1f}m)")
+                print(f"🌊 Waves will spawn at BOTTOM and move UP")
+        else:
+            # Fallback: assume standard setup (beach at bottom)
+            self.spawn_y_ratio = 0.75
+            self.wave_base_direction = -np.pi / 2
+            print("⚠️  Could not auto-detect beach, using default (bottom)")
+
+        # Store for later use
+        self.direction = np.radians(base_direction_deg)  # Store for variation
 
     def step(self, dt: float):
         """
@@ -89,8 +247,11 @@ class WaveSimulator:
         for wave in self.waves:
             self._update_wave(wave, dt)
 
-            # Remove waves that reached shore or expired whitewash
-            if wave.is_whitewash and wave.whitewash_timer <= 0:
+            # Remove waves that:
+            # 1. Reached shore (y <= 0)
+            # 2. Whitewash that has decayed (height < 0.1m)
+            if wave.y_position <= 0 or \
+               (wave.phase == WavePhase.WHITEWASH and wave.height < 0.1):
                 waves_to_remove.append(wave)
 
         # Clean up finished waves
@@ -98,103 +259,126 @@ class WaveSimulator:
             self.waves.remove(wave)
 
     def _spawn_wave(self):
-        """Spawn a new wave at the spawn distance."""
-        # Random height variation
-        height = self.base_height * (1 + np.random.uniform(-self.randomness, self.randomness))
-
+        """Spawn a new wave front with angled direction from deep water."""
         ocean_width, ocean_height = self.ocean_floor.get_dimensions()
 
-        # Spawn waves at FAR end of ocean (deep water) moving toward shore
-        # Shore is at y=0, deep ocean at y=ocean_height
-        # But keep waves ON the map by spawning closer for small oceans
-        if ocean_height < 100:
-            spawn_y = ocean_height * 0.65  # Closer for small maps
-        else:
-            spawn_y = ocean_height * 0.85  # Far for large maps
+        # Use detected spawn location (deep water side)
+        spawn_y = ocean_height * self.spawn_y_ratio
 
-        spawn_x = ocean_width / 2  # Center
+        # ANGLED WAVE DIRECTION with variation
+        # Use detected base direction (toward beach)
+        angle_variation = np.radians(30)  # ±30 degrees variation
+        wave_direction = self.wave_base_direction + np.random.uniform(-angle_variation, angle_variation)
 
-        # Waves should move TOWARD shore (negative y direction)
-        # Override direction to point toward beach
-        wave_direction = -np.pi / 2  # Pointing toward y=0 (south/toward beach)
+        # Clamp to reasonable range based on base direction
+        # If moving south (-Y), allow -2π/3 to -π/3 (240° to 300°)
+        # If moving north (+Y), allow π/3 to 2π/3 (60° to 120°)
+        if self.wave_base_direction < 0:  # Moving south
+            wave_direction = np.clip(wave_direction, -2*np.pi/3, -np.pi/3)
+        else:  # Moving north
+            wave_direction = np.clip(wave_direction, np.pi/3, 2*np.pi/3)
 
-        position = np.array([spawn_x, spawn_y])
+        # Calculate wave front LINE perpendicular to wave direction
+        # Front line direction is perpendicular (rotate by 90°)
+        front_line_angle = wave_direction + np.pi/2
 
-        # Wave speed - scale based on ocean size to keep waves visible
-        # For small oceans, slow down waves to keep them on-screen longer
+        # Front line extends across ocean
+        # Calculate endpoints that span the ocean
+        center_x = ocean_width / 2
+        half_length = ocean_width * 0.7  # Front line length
+
+        # Front line endpoints
+        dx = np.cos(front_line_angle) * half_length
+        dy = np.sin(front_line_angle) * half_length
+
+        front_start = np.array([center_x - dx, spawn_y - dy])
+        front_end = np.array([center_x + dx, spawn_y + dy])
+
+        # Max height with random variation
+        max_height = self.base_height * (1 + np.random.uniform(-self.randomness, self.randomness))
+        initial_height = max_height * 0.2
+
+        # Wave speed - slower for small oceans
         base_speed = 1.56 * self.wave_period
         if ocean_height < 100:
-            speed = base_speed * 0.3  # Slower for small maps
+            speed = base_speed * 0.25
         else:
-            speed = base_speed
+            speed = base_speed * 0.5
 
         wave = Wave(
-            position=position,
-            height=height,
-            direction=wave_direction,  # Use corrected direction toward shore
+            front_start=front_start,
+            front_end=front_end,
+            height=initial_height,
+            max_height=max_height,
             speed=speed,
-            period=self.wave_period
+            period=self.wave_period,
+            direction=wave_direction,  # Angled!
+            phase=WavePhase.BUILDING,
+            phase_timer=0.0
         )
 
         self.waves.append(wave)
 
     def _update_wave(self, wave: Wave, dt: float):
-        """Update a single wave."""
-        # Get current depth
-        depth = self.ocean_floor.get_depth(wave.position[0], wave.position[1])
+        """Update wave front through its lifecycle phases."""
+        wave.phase_timer += dt
 
-        if wave.is_whitewash:
-            # Whitewash moves slower and decays
-            wave.speed = 2.0  # m/s
-            wave.whitewash_timer -= dt
-            wave.height *= 0.95  # Decay
+        # Phase transitions
+        if wave.phase == WavePhase.BUILDING:
+            # Grow height over building duration
+            growth_progress = wave.phase_timer / wave.building_duration
+            wave.height = wave.max_height * (0.2 + 0.8 * min(1.0, growth_progress))
 
-        elif wave.is_breaking:
-            # Breaking wave transitions to whitewash
-            wave.is_whitewash = True
-            wave.whitewash_timer = self.whitewash_duration
-            wave.height *= 0.7  # Reduce height
+            # Transition to FRONT when building complete
+            if wave.phase_timer >= wave.building_duration:
+                wave.phase = WavePhase.FRONT
+                wave.phase_timer = 0.0
+                wave.height = wave.max_height
 
-        else:
-            # Check if wave should break
-            if depth > 0 and wave.height > depth * self.breaking_depth_ratio:
-                wave.is_breaking = True
+        elif wave.phase == WavePhase.FRONT:
+            # Front phase: maintain max height, this is rideable!
+            wave.height = wave.max_height
 
-            # Wave speed depends on depth (shallow water wave theory)
-            if depth > 0:
-                # c = sqrt(g * depth) for shallow water
-                wave.speed = np.sqrt(9.81 * depth)
+            # Check depth-based breaking
+            center_x = (wave.x_start + wave.x_end) / 2
+            depth = self.ocean_floor.get_depth(center_x, wave.y_position)
 
-            # Wave refraction - waves turn toward shore as they slow
-            gradient = self.ocean_floor.get_gradient(wave.position[0], wave.position[1])
-            if depth > 0 and depth < 10:
-                # Refraction effect
-                refraction = -np.arctan2(gradient[1], gradient[0]) * 0.1
-                wave.direction += refraction * dt
+            # Transition to WHITEWASH when too shallow OR front duration expires
+            if (depth > 0 and wave.height > depth * self.breaking_depth_ratio) or \
+               (wave.phase_timer >= wave.front_duration):
+                wave.phase = WavePhase.WHITEWASH
+                wave.phase_timer = 0.0
 
-        # Check pier interference
-        for pier_x, pier_y in self.pier_positions:
-            dist = np.linalg.norm(wave.position - np.array([pier_x, pier_y]))
-            if dist < 2.0:  # Pier interference radius
-                # Pier reduces wave height
-                wave.height *= 0.7
-                # Pier can cause wave to break
-                if not wave.is_breaking and not wave.is_whitewash:
-                    wave.is_breaking = True
+        elif wave.phase == WavePhase.WHITEWASH:
+            # Whitewash phase: decay height, move slower
+            wave.height *= 0.98  # Gradual decay
+            wave.speed *= 0.95  # Slow down
 
-        # Move wave
+        # Move wave front in its direction
+        # Both endpoints move together (parallel translation)
         dx = np.cos(wave.direction) * wave.speed * dt
         dy = np.sin(wave.direction) * wave.speed * dt
-        wave.position += np.array([dx, dy])
+        movement = np.array([dx, dy])
+
+        wave.front_start += movement
+        wave.front_end += movement
+
+        # Check if wave reached shore (center y < 0)
+        if wave.position[1] < 0:
+            # Clamp to shore
+            wave.front_start[1] = max(0, wave.front_start[1])
+            wave.front_end[1] = max(0, wave.front_end[1])
 
     def get_wave_height_at(self, x: float, y: float, current_time: float = None) -> float:
         """
-        Get total wave height at a position.
+        Get wave height at a position (from wave fronts).
+
+        Wave affects height if position is within the front's influence zone.
 
         Args:
             x: X coordinate
             y: Y coordinate
-            current_time: Current simulation time (uses self.time if None)
+            current_time: Current simulation time (unused, for compatibility)
 
         Returns:
             Wave height in meters
@@ -205,23 +389,41 @@ class WaveSimulator:
         total_height = 0.0
 
         for wave in self.waves:
-            # Distance from wave front
-            dist = np.linalg.norm(np.array([x, y]) - wave.position)
+            # Calculate distance from point to wave front LINE
+            # Use perpendicular distance formula
+            point = np.array([x, y])
 
-            # Wave profile (sine wave)
-            wavelength = wave.speed * wave.period
-            if dist < wavelength * 2:  # Only nearby waves affect
-                phase = (dist / wavelength) * 2 * np.pi
-                # Gaussian envelope to localize wave
-                envelope = np.exp(-((dist / wavelength) ** 2))
-                height = wave.height * np.sin(phase) * envelope
-                total_height += height
+            # Vector along wave front
+            front_vec = wave.front_end - wave.front_start
+            front_length = np.linalg.norm(front_vec)
+
+            if front_length < 0.01:
+                continue  # Degenerate wave
+
+            # Vector from front start to point
+            to_point = point - wave.front_start
+
+            # Project point onto front line
+            t = np.dot(to_point, front_vec) / (front_length ** 2)
+            t = np.clip(t, 0, 1)  # Clamp to line segment
+
+            # Closest point on line segment
+            closest = wave.front_start + t * front_vec
+
+            # Distance from point to front line
+            dist_to_front = np.linalg.norm(point - closest)
+
+            # Wave influence based on distance (thickness zone)
+            front_thickness = 2.0  # meters
+            if dist_to_front < front_thickness:
+                influence = 1.0 - (dist_to_front / front_thickness)
+                total_height += wave.height * influence
 
         return max(0, total_height)
 
     def get_wave_velocity_at(self, x: float, y: float) -> Tuple[float, float]:
         """
-        Get wave-induced water velocity at a position.
+        Get wave-induced water velocity at a position (from wave fronts).
 
         Args:
             x: X coordinate
@@ -233,15 +435,36 @@ class WaveSimulator:
         vx, vy = 0.0, 0.0
 
         for wave in self.waves:
-            dist = np.linalg.norm(np.array([x, y]) - wave.position)
-            wavelength = wave.speed * wave.period
+            # Calculate distance from point to wave front
+            point = np.array([x, y])
+            front_vec = wave.front_end - wave.front_start
+            front_length = np.linalg.norm(front_vec)
 
-            if dist < wavelength * 2:
-                # Wave orbital velocity
-                envelope = np.exp(-((dist / wavelength) ** 2))
-                v = wave.speed * 0.3 * envelope  # Scale down velocity
+            if front_length < 0.01:
+                continue
 
-                # Direction of wave
+            to_point = point - wave.front_start
+            t = np.dot(to_point, front_vec) / (front_length ** 2)
+            t = np.clip(t, 0, 1)
+            closest = wave.front_start + t * front_vec
+            dist_to_front = np.linalg.norm(point - closest)
+
+            # Larger influence zone for velocity
+            front_thickness = 3.0
+            if dist_to_front < front_thickness:
+                influence = 1.0 - (dist_to_front / front_thickness)
+
+                # Velocity strength based on wave phase
+                if wave.phase == WavePhase.WHITEWASH:
+                    v_strength = wave.speed * 0.5  # Whitewash pushes hard
+                elif wave.phase == WavePhase.FRONT:
+                    v_strength = wave.speed * 0.3  # Front pushes moderately
+                else:
+                    v_strength = wave.speed * 0.1  # Building has little effect
+
+                v = v_strength * influence
+
+                # Velocity in wave's direction
                 vx += np.cos(wave.direction) * v
                 vy += np.sin(wave.direction) * v
 
@@ -263,7 +486,9 @@ class WaveSimulator:
 
     def get_nearest_wave(self, x: float, y: float) -> Optional[Wave]:
         """
-        Get the nearest wave to a position.
+        Get the nearest wave front to a position.
+
+        For wave fronts, "nearest" means closest in y-direction.
 
         Args:
             x: X coordinate
@@ -275,14 +500,24 @@ class WaveSimulator:
         if not self.waves:
             return None
 
-        min_dist = float('inf')
+        min_y_dist = float('inf')
         nearest = None
 
         for wave in self.waves:
-            dist = np.linalg.norm(np.array([x, y]) - wave.position)
-            if dist < min_dist:
-                min_dist = dist
-                nearest = wave
+            # Check if within x-range of this wave front
+            if wave.x_start <= x <= wave.x_end:
+                y_dist = abs(y - wave.y_position)
+                if y_dist < min_y_dist:
+                    min_y_dist = y_dist
+                    nearest = wave
+
+        # If no wave contains this x position, find closest by y anyway
+        if nearest is None and self.waves:
+            for wave in self.waves:
+                y_dist = abs(y - wave.y_position)
+                if y_dist < min_y_dist:
+                    min_y_dist = y_dist
+                    nearest = wave
 
         return nearest
 

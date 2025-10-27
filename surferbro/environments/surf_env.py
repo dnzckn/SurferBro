@@ -127,11 +127,14 @@ class SurfEnvironment(gym.Env):
     def _define_spaces(self):
         """Define observation and action spaces."""
         # Observation space:
-        # - Surfer state (15 values)
+        # - Surfer state (18 values): x, y, z, vx, vy, vz, roll, pitch, yaw,
+        #                             roll_rate, pitch_rate, yaw_rate,
+        #                             is_swimming, is_duck_diving, is_being_carried,
+        #                             is_surfing, is_whitewash_carry, wave_carry_timer
         # - Wave info (5 values): height, vx, vy, distance to nearest wave, wave is breaking
         # - Jellyfish info (3 values): dx, dy, distance
         # - Environment info (3 values): depth, distance to shore, in wave zone
-        obs_dim = 15 + 5 + 3 + 3
+        obs_dim = 18 + 5 + 3 + 3
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -248,13 +251,39 @@ class SurfEnvironment(gym.Env):
 
                     self.surfer.apply_board_control(roll, pitch, yaw, paddle, self.dt)
 
-                    # Try to catch wave
-                    if self.surfer.try_catch_wave(
-                        nearest_wave.height,
-                        nearest_wave.direction,
-                        nearest_wave.speed
-                    ):
+                    # Try to catch wave (pass wave object for 45° check!)
+                    if self.surfer.try_catch_wave(nearest_wave):
                         self.caught_wave = True
+
+        elif self.surfer.state.is_being_carried:
+            # Being carried by wave: [turn, lean, stand_up_trigger, -]
+            turn = action[0]
+            lean = action[1]
+            stand_up_trigger = action[2] > 0.0
+
+            # Allow small adjustments while being carried
+            self.surfer.state.yaw += turn * self.dt * 1.0
+            self.surfer.state.roll += (lean * np.pi / 12 - self.surfer.state.roll) * self.dt * 2.0
+
+            # Try to stand up if triggered
+            if stand_up_trigger:
+                nearest_wave = self.wave_simulator.get_nearest_wave(surfer_x, surfer_y)
+                if nearest_wave:
+                    success, message = self.surfer.try_stand_up(nearest_wave.direction)
+                    if success:
+                        # Successfully stood up!
+                        pass  # Reward will be given in _calculate_reward
+                    else:
+                        # Crashed! Will be handled as wipeout
+                        pass
+
+        elif self.surfer.state.is_whitewash_carry:
+            # Being carried by whitewash: [-, -, duck_dive_trigger, -]
+            # Surfer can duck dive to escape whitewash carry!
+            duck_dive_trigger = action[2] > 0.0
+
+            # Apply swimming action to handle duck dive escape
+            self.surfer.apply_swimming_action(0.0, 0.0, duck_dive_trigger, self.dt)
 
         elif self.surfer.state.is_surfing:
             # Surfing phase: [lean, turn, -, -]
@@ -268,7 +297,18 @@ class SurfEnvironment(gym.Env):
         wave_vel = self.wave_simulator.get_wave_velocity_at(surfer_x, surfer_y)
         water_depth = self.ocean_floor.get_depth(surfer_x, surfer_y)
 
-        self.surfer.update_physics(wave_height, wave_vel, water_depth, self.dt)
+        # Check if near a wave (for collision/pushback)
+        near_wave = False
+        nearest_wave = self.wave_simulator.get_nearest_wave(surfer_x, surfer_y)
+        if nearest_wave:
+            dist_to_wave = np.linalg.norm(
+                nearest_wave.position - np.array([surfer_x, surfer_y])
+            )
+            # Wave collision radius based on wave height
+            collision_radius = nearest_wave.height * 3.0
+            near_wave = dist_to_wave < collision_radius
+
+        self.surfer.update_physics(wave_height, wave_vel, water_depth, self.dt, near_wave)
         self.wave_simulator.step(self.dt)
         self.jellyfish_swarm.update(self.dt)
 
@@ -276,17 +316,17 @@ class SurfEnvironment(gym.Env):
         if self.wave_simulator.is_in_wave_zone(surfer_x, surfer_y):
             self.reached_wave_zone = True
 
-        # Calculate reward
-        reward = self._calculate_reward()
+        # Calculate reward (pass wave collision info for duck dive rewards)
+        reward = self._calculate_reward(near_wave=near_wave)
 
         # Check termination conditions
         terminated = False
         truncated = False
 
-        # Wipeout
+        # Wipeout (NO LONGER TERMINATES - starts whitewash carry!)
         if self.surfer.check_wipeout(wave_height):
             reward += self.config.get('rewards.fall_penalty')
-            terminated = True
+            # Episode continues - surfer gets carried by whitewash!
 
         # Jellyfish collision
         if self.jellyfish_swarm.check_collision(surfer_x, surfer_y, surfer_z):
@@ -347,30 +387,54 @@ class SurfEnvironment(gym.Env):
 
         return observation.astype(np.float32)
 
-    def _calculate_reward(self) -> float:
-        """Calculate reward for current step."""
+    def _calculate_reward(self, near_wave: bool = False) -> float:
+        """Calculate reward for current step.
+
+        Args:
+            near_wave: Whether surfer is near a wave (for duck dive rewards)
+        """
         reward = 0.0
 
         # Time penalty (encourages efficiency)
         reward += self.config.get('rewards.time_penalty')
+
+        # NEW: Reward for moving toward waves (forward progress)
+        if self.surfer.state.is_swimming and not self.surfer.state.is_duck_diving:
+            # Reward for velocity in +Y direction (toward waves)
+            if self.surfer.state.vy > 0:
+                reward += self.surfer.state.vy * 0.5 * self.dt  # Immediate feedback
 
         # Reward for reaching wave zone
         if self.reached_wave_zone and self.timestep < 100:
             reward += self.config.get('rewards.reach_wave_zone')
             self.reached_wave_zone = False  # Only reward once
 
-        # Reward for catching wave
+        # Reward for catching wave (starting to be carried)
         if self.caught_wave:
             reward += self.config.get('rewards.wave_catch_success')
             self.caught_wave = False
 
-        # Reward for surfing
+        # Reward for being carried (learning to wait before standing)
+        if self.surfer.state.is_being_carried:
+            reward += 0.5 * self.dt  # Small reward for being patient
+
+        # Reward for surfing (after successfully standing up)
         if self.surfer.state.is_surfing:
             reward += self.config.get('rewards.surfing_per_second') * self.dt
 
-        # Duck dive success (getting under a wave)
-        if self.surfer.state.is_duck_diving and self.surfer.state.z < -0.5:
+        # Duck dive success (avoiding wave pushback)
+        if self.surfer.state.is_duck_diving and near_wave:
+            # Reward for being underwater when wave is near (smart timing!)
             reward += self.config.get('rewards.duck_dive_success') * self.dt
+
+        # NEW: Reward for escaping whitewash via duck dive
+        if self.surfer.state.is_duck_diving and not self.surfer.state.is_whitewash_carry:
+            # Small reward for using duck dive effectively
+            reward += 1.0 * self.dt
+
+        # Penalty for being stuck in whitewash (encourages escape)
+        if self.surfer.state.is_whitewash_carry:
+            reward -= 2.0 * self.dt
 
         # Bonus for distance traveled while surfing
         if self.surfer.state.is_surfing:
