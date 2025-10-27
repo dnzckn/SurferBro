@@ -49,12 +49,15 @@ htmlcov/
 
 # ML Models and data
 trained_models/
+models/
+checkpoints/
 *.zip
 *.pt
 *.pth
 logs/
 tensorboard_logs/
 wandb/
+archive/
 
 # Ocean designs
 ocean_designs/*.json
