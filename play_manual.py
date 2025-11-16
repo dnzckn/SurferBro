@@ -40,15 +40,17 @@ for iy in range(grid_height):
 ocean_floor = OceanFloor(depth_map=depth_map, cell_size=0.5)
 
 # Create wave simulator
+# Toggle straight_waves=True for testing (no angle variation), False for realistic waves
 wave_sim = WaveSimulator(
     ocean_floor=ocean_floor,
     wave_period=12.0,  # Wave every 12 seconds
     base_height=2.0,
-    randomness=0.2
+    randomness=0.2,
+    straight_waves=True  # Set to False for angled waves (-45° to +45°)
 )
 
 # Create surfer (even faster!)
-surfer = Surfer(mass=75.0, swim_speed=6.0, duck_dive_depth=1.0)  # 2x faster than before!
+surfer = Surfer(mass=75.0, swim_speed=9.0, duck_dive_depth=1.0)  # 50% faster (6.0 -> 9.0)
 
 ocean_width, ocean_height = ocean_floor.get_dimensions()
 
@@ -87,7 +89,7 @@ WAVE_BREAKING = (255, 255, 100)
 WHITE = (255, 255, 255)
 SAND = (244, 228, 193)
 SURFER_COLOR = (255, 100, 100)
-BOARD_COLOR = (255, 255, 200)
+BOARD_COLOR = (255, 0, 0)  # Bright red - highly visible!
 
 font = pygame.font.Font(None, 24)
 font_large = pygame.font.Font(None, 32)
@@ -173,7 +175,13 @@ while running:
         if swim_x != 0 or swim_y != 0:
             swim_power = np.sqrt(swim_x**2 + swim_y**2)
             swim_power = min(swim_power, 1.0)
-            base_speed = swim_power * surfer.swim_speed
+
+            # When SURFING: 5x speed for moving along the wave!
+            # When swimming: normal speed
+            if surfer.state.is_surfing:
+                base_speed = swim_power * surfer.swim_speed * 5.0  # 5x speed while surfing!
+            else:
+                base_speed = swim_power * surfer.swim_speed
 
             # Calculate movement direction
             movement_angle = np.arctan2(swim_y, swim_x)
@@ -204,10 +212,17 @@ while running:
             else:
                 surfer.state.vz = 0.0
 
-        # Handle duck dive
+        # Handle duck dive - also exits surfing if currently riding!
         if duck_dive and surfer.state.duck_dive_timer <= 0:
             surfer.state.duck_dive_timer = surfer.state.duck_dive_duration
             surfer.state.is_duck_diving = True
+
+            # Exit surfing if currently riding a wave
+            if surfer.state.is_surfing:
+                surfer.state.is_surfing = False
+                surfer.state.is_swimming = True
+                surfer.state.surfing_wave = None
+                print(f"🏄 Exited wave by duck diving!")
 
         # Update duck dive timer
         if surfer.state.duck_dive_timer > 0:
@@ -228,30 +243,48 @@ while running:
     if nearest_wave and not surfer.state.is_duck_diving and not surfer.state.is_surfing and not is_crashed:
         dist_to_wave = np.linalg.norm(nearest_wave.position - np.array([surfer.state.x, surfer.state.y]))
 
-        # Wave collision zone
-        if dist_to_wave < 10.0:
+        # Wave collision zone (increased from 10m to 30m for easier catching)
+        if dist_to_wave < 30.0:
+            if is_attempting_catch:
+                print(f"  └─ Wave close enough (dist={dist_to_wave:.1f}m)")
             # Check if wave will break soon (within 2 seconds)
             time_until_breaking = nearest_wave.breaking_duration - nearest_wave.phase_timer if nearest_wave.phase == WavePhase.BUILDING else 0
             catchable = time_until_breaking <= 2.0 or nearest_wave.is_breaking
 
-            # During catch attempt, try to catch if wave is catchable
-            if is_attempting_catch and catchable and not nearest_wave.is_whitewash:
+            # DEBUG: Show state when attempting catch
+            if is_attempting_catch:
+                print(f"  └─ Wave near: dist={dist_to_wave:.1f}, catchable={catchable}, timer={catch_attempt_timer:.2f}, phase={nearest_wave.phase.value}, breaking={nearest_wave.is_breaking}, whitewash={nearest_wave.is_whitewash}")
+
+            # During catch attempt, try to catch (no catchable requirement - allow catching any breaking wave)
+            if is_attempting_catch and catch_attempt_timer > 0 and nearest_wave.is_breaking and not nearest_wave.is_whitewash:
                 # DEBUG: Print angles
                 wave_angle_deg = np.degrees(nearest_wave.angle) % 360
-                # TWO optimal angles (can ride left OR right)
-                optimal_angle_1 = nearest_wave.angle + np.pi + np.pi / 4
-                optimal_angle_2 = nearest_wave.angle + np.pi - np.pi / 4
+                # TWO optimal angles - MATCH BACKEND EXACTLY
+                # Backend uses: wave.angle + π + π/4 + π/2  and  wave.angle + π - π/4 + π/2
+                optimal_angle_1 = nearest_wave.angle + np.pi + np.pi / 4 + np.pi / 2
+                optimal_angle_2 = nearest_wave.angle + np.pi - np.pi / 4 + np.pi / 2
 
                 # Normalize both
-                for opt in [optimal_angle_1, optimal_angle_2]:
-                    while opt > np.pi:
-                        opt -= 2 * np.pi
-                    while opt < -np.pi:
-                        opt += 2 * np.pi
+                while optimal_angle_1 > np.pi:
+                    optimal_angle_1 -= 2 * np.pi
+                while optimal_angle_1 < -np.pi:
+                    optimal_angle_1 += 2 * np.pi
+
+                while optimal_angle_2 > np.pi:
+                    optimal_angle_2 -= 2 * np.pi
+                while optimal_angle_2 < -np.pi:
+                    optimal_angle_2 += 2 * np.pi
 
                 optimal_1_deg = np.degrees(optimal_angle_1) % 360
                 optimal_2_deg = np.degrees(optimal_angle_2) % 360
-                surfer_angle_deg = np.degrees(surfer.state.yaw) % 360
+
+                # Use surfer yaw directly - NO flip needed since backend doesn't flip anymore
+                surfer_angle_check = surfer.state.yaw
+                while surfer_angle_check > np.pi:
+                    surfer_angle_check -= 2 * np.pi
+                while surfer_angle_check < -np.pi:
+                    surfer_angle_check += 2 * np.pi
+                surfer_angle_deg = np.degrees(surfer_angle_check) % 360
 
                 def angle_diff(a, b):
                     diff = abs(a - b)
@@ -259,8 +292,8 @@ while running:
                         diff = 2 * np.pi - diff
                     return diff
 
-                angle_diff_1 = angle_diff(surfer.state.yaw, optimal_angle_1)
-                angle_diff_2 = angle_diff(surfer.state.yaw, optimal_angle_2)
+                angle_diff_1 = angle_diff(surfer_angle_check, optimal_angle_1)
+                angle_diff_2 = angle_diff(surfer_angle_check, optimal_angle_2)
                 angle_diff_1_deg = np.degrees(angle_diff_1)
                 angle_diff_2_deg = np.degrees(angle_diff_2)
 
@@ -271,35 +304,46 @@ while running:
                     print(f"🎯 Wave: {wave_angle_deg:.1f}° | Optimal: {optimal_2_deg:.1f}° (or {optimal_1_deg:.1f}°) | You: {surfer_angle_deg:.1f}° | Diff: {angle_diff_2_deg:.1f}°")
 
                 # Try to catch wave
-                if surfer.try_catch_wave_angle(nearest_wave):
+                print(f"  ├─ Trying to catch... (state: swimming={surfer.state.is_swimming}, surfing={surfer.state.is_surfing}, carrying={surfer.state.is_being_carried})")
+                catch_success = surfer.try_catch_wave_angle(nearest_wave)
+                print(f"  ├─ Catch result: {catch_success}")
+                if catch_success:
                     print(f"🌊 CAUGHT WAVE at {sim_time:.1f}s!")
                     total_reward += 50.0
-                    # Set to being carried by wave
-                    surfer.state.is_surfing = False
-                    surfer.state.is_being_carried = True
-                    surfer.state.is_swimming = False
+                    # Backend already set is_surfing and wave reference
                     is_attempting_catch = False
                     catch_attempt_timer = 0.0
-                    print(f"🏄 RIDING WAVE!")
+                    print(f"🏄 NOW RIDING THE WAVE! Use W/A/D/S to move along the wave, or press 1 to duck dive off!")
+                else:
+                    print(f"  └─ Failed to catch (wrong angle?)")
 
         # Wave hits surfer without attempting to catch - CRASH!
-        if not is_attempting_catch and nearest_wave.is_breaking and dist_to_wave < 5.0:
-            print(f"💥 CRASH! Hit by wave (didn't attempt to catch or duck dive)")
-            is_crashed = True
-            crash_timer = 5.0
-            total_reward -= 15.0
-            surfer.state.vx = 0
-            surfer.state.vy = 0
+        # DISABLED FOR TESTING - don't crash while attempting to catch
+        # if not is_attempting_catch and nearest_wave.is_breaking and dist_to_wave < 5.0:
+        #     print(f"💥 CRASH! Hit by wave (didn't attempt to catch or duck dive)")
+        #     is_crashed = True
+        #     crash_timer = 5.0
+        #     total_reward -= 15.0
+        #     surfer.state.vx = 0
+        #     surfer.state.vy = 0
 
     # Failed catch attempt - timer expired
-    if is_attempting_catch and catch_attempt_timer <= 0:
-        print(f"💥 CRASH! Failed to catch wave (wrong angle or timing)")
-        is_crashed = True
-        crash_timer = 5.0
-        total_reward -= 20.0
-        surfer.state.vx = 0
-        surfer.state.vy = 0
-        is_attempting_catch = False
+    # DISABLED FOR TESTING - let's see what's actually happening
+    # if is_attempting_catch and catch_attempt_timer <= 0:
+    #     print(f"💥 CRASH! Failed to catch wave (wrong angle or timing)")
+    #     is_crashed = True
+    #     crash_timer = 5.0
+    #     total_reward -= 20.0
+    #     surfer.state.vx = 0
+    #     surfer.state.vy = 0
+    #     is_attempting_catch = False
+
+    # Decrement catch attempt timer
+    if is_attempting_catch:
+        catch_attempt_timer -= dt
+        if catch_attempt_timer <= 0:
+            is_attempting_catch = False
+            catch_attempt_timer = 0
 
     # Update physics
     wave_height = wave_sim.get_wave_height_at(surfer.state.x, surfer.state.y)
@@ -450,26 +494,28 @@ while running:
     pygame.draw.circle(screen, SURFER_COLOR, (sx, sy), surfer_radius)
 
     # Direction indicators - shows BOTH OPTIMAL wave-catching angles (GREEN arrows)
+    # Arrows point in the direction the surfer should FACE to catch the wave
     if nearest_wave and np.linalg.norm(nearest_wave.position - np.array([surfer.state.x, surfer.state.y])) < 50.0:
-        # Calculate TWO optimal angles (can ride left OR right along wave face)
-        # Angle 1: opposite direction + 45°
-        optimal_angle_1 = nearest_wave.angle + np.pi + np.pi / 4
-        while optimal_angle_1 > np.pi:
-            optimal_angle_1 -= 2 * np.pi
-        while optimal_angle_1 < -np.pi:
-            optimal_angle_1 += 2 * np.pi
+        # Calculate TWO optimal angles for surfer to face
+        # Surfer faces opposite to wave direction, ±45° to ride along the wave
+        # Face direction 1: opposite wave + 45° + 90° (coordinate system adjustment)
+        face_angle_1 = nearest_wave.angle + np.pi + np.pi / 4 + np.pi / 2
+        while face_angle_1 > np.pi:
+            face_angle_1 -= 2 * np.pi
+        while face_angle_1 < -np.pi:
+            face_angle_1 += 2 * np.pi
 
-        # Angle 2: opposite direction - 45°
-        optimal_angle_2 = nearest_wave.angle + np.pi - np.pi / 4
-        while optimal_angle_2 > np.pi:
-            optimal_angle_2 -= 2 * np.pi
-        while optimal_angle_2 < -np.pi:
-            optimal_angle_2 += 2 * np.pi
+        # Face direction 2: opposite wave - 45° + 90° (coordinate system adjustment)
+        face_angle_2 = nearest_wave.angle + np.pi - np.pi / 4 + np.pi / 2
+        while face_angle_2 > np.pi:
+            face_angle_2 -= 2 * np.pi
+        while face_angle_2 < -np.pi:
+            face_angle_2 += 2 * np.pi
 
-        # Draw BOTH green arrows
-        for opt_angle in [optimal_angle_1, optimal_angle_2]:
-            dx = np.cos(opt_angle) * surfer_radius * 5
-            dy = np.sin(opt_angle) * surfer_radius * 5
+        # Draw BOTH green arrows showing where surfer should face
+        for face_angle in [face_angle_1, face_angle_2]:
+            dx = np.cos(face_angle) * surfer_radius * 5
+            dy = np.sin(face_angle) * surfer_radius * 5
             pygame.draw.line(screen, (0, 255, 0), (sx, sy), (sx + int(dx), sy + int(dy)), 4)
 
     # Status text
@@ -513,7 +559,13 @@ while running:
             while optimal_angle < -np.pi:
                 optimal_angle += 2 * np.pi
             optimal_angle_deg = np.degrees(optimal_angle)
-            surfer_angle_deg = np.degrees(surfer.state.yaw)
+            # Flip surfer angle 180° to match coordinate system
+            surfer_angle_flipped = surfer.state.yaw + np.pi
+            while surfer_angle_flipped > np.pi:
+                surfer_angle_flipped -= 2 * np.pi
+            while surfer_angle_flipped < -np.pi:
+                surfer_angle_flipped += 2 * np.pi
+            surfer_angle_deg = np.degrees(surfer_angle_flipped)
 
             # Calculate angle difference
             def angle_diff(a, b):
@@ -522,7 +574,7 @@ while running:
                     diff = 2 * np.pi - diff
                 return diff
 
-            angle_difference = angle_diff(surfer.state.yaw, optimal_angle)
+            angle_difference = angle_diff(surfer_angle_flipped, optimal_angle)
             angle_diff_deg = np.degrees(angle_difference)
 
             # Color code based on how close

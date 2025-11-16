@@ -45,6 +45,9 @@ class SurferState:
     wave_carry_timer: float = 0.0
     required_carry_duration: float = 1.0  # Required duration (depends on wave size)
 
+    # Current wave being surfed (for surfing state)
+    surfing_wave: object = None  # Wave object reference
+
 
 class Surfer:
     """Surfer physics simulation."""
@@ -383,21 +386,49 @@ class Surfer:
                 self.state.z = wave_height
 
         elif self.state.is_being_carried:
-            # Being carried by wave (before standing up)
+            # Being carried by wave - move in direction surfer is pointing
             self.state.wave_carry_timer += dt
 
-            # Wave carries surfer (medium strength)
+            # Stop being carried after 5 seconds (long enough to ride)
+            if self.state.wave_carry_timer >= 5.0:
+                self.state.is_being_carried = False
+                self.state.is_swimming = True
+                self.state.wave_carry_timer = 0.0
+
+            # Move surfer in direction they're pointing at fast speed!
+            # Get surfer's direction
+            surfer_direction = self.state.yaw  # What direction surfer is facing
+            # Fast carry speed (3.6 m/s from wave speed, with 1.5x momentum)
+            carry_speed = 5.4  # 3.6 * 1.5
+            self.state.vx = np.cos(surfer_direction) * carry_speed
+            self.state.vy = np.sin(surfer_direction) * carry_speed
+
             self.state.z = wave_height + 0.1
-            self.state.vx = wave_velocity[0] * 1.2
-            self.state.vy = wave_velocity[1] * 1.2
 
         elif self.state.is_surfing:
-            # Riding the wave (actively surfing)
-            self.state.z = wave_height + 0.2  # Slightly above wave
+            # Riding the wave (actively surfing on the wave face!)
+            # Attach surfer to the TOP of the wave for clear visual feedback
+            self.state.z = wave_height + 0.5  # On top of the wave!
 
-            # Wave propels surfer (full strength)
-            self.state.vx = wave_velocity[0] * 1.5
-            self.state.vy = wave_velocity[1] * 1.5
+            # Auto-exit surfing when wave becomes whitewash
+            if self.state.surfing_wave and self.state.surfing_wave.is_whitewash:
+                self.state.is_surfing = False
+                self.state.is_swimming = True
+                self.state.surfing_wave = None
+            else:
+                # Surfer controls left/right movement along wave face (5x speed!)
+                # Wave provides forward momentum at 1x base speed, surfer moves left/right at 5x
+                wave_speed_x = wave_velocity[0]  # Wave forward push
+                wave_speed_y = wave_velocity[1]  # Wave forward push
+
+                # Add surfer's left/right movement (perpendicular to wave direction)
+                # Allow W/S and A/D controls at high speed
+                surfer_leftright_speed = 5.4 * 5.0  # 5x the normal speed for left/right
+                surfer_leftright = self.state.vx * 0.01  # Get intended lateral direction
+
+                # Total movement = wave push + surfer's left/right control
+                self.state.vx = wave_speed_x + surfer_leftright
+                self.state.vy = wave_speed_y
 
         elif self.state.is_whitewash_carry:
             # Being carried by whitewash after crash
@@ -489,21 +520,34 @@ class Surfer:
         Returns:
             True if wave caught successfully (starts carrying phase)
         """
-        if self.state.is_surfing or self.state.is_being_carried or not self.state.is_swimming:
+        print(f"  TRY_CATCH: surfing={self.state.is_surfing}, carrying={self.state.is_being_carried}, swimming={self.state.is_swimming}")
+        # Can catch while swimming (stationary or moving), but not while already surfing or being carried
+        if self.state.is_surfing or self.state.is_being_carried:
+            print(f"  TRY_CATCH: FAIL - already surfing or being carried")
+            return False
+
+        # Must be in water (swimming), not on beach or elsewhere
+        if not self.state.is_swimming:
+            print(f"  TRY_CATCH: FAIL - not in water")
             return False
 
         # Calculate TWO optimal angles (can ride left OR right along wave face)
-        # Angle 1: opposite direction + 45°
-        optimal_angle_1 = wave.angle + np.pi + np.pi / 4  # 180° + 45°
-        # Angle 2: opposite direction - 45°
-        optimal_angle_2 = wave.angle + np.pi - np.pi / 4  # 180° - 45°
+        # Match the EXACT angle calculations from the visual green arrows in play_manual.py
+        # Arrow 1: wave.angle + π + π/4 + π/2
+        # Arrow 2: wave.angle + π - π/4 + π/2
+        optimal_angle_1 = wave.angle + np.pi + np.pi / 4 + np.pi / 2
+        optimal_angle_2 = wave.angle + np.pi - np.pi / 4 + np.pi / 2
 
         # Normalize both angles to [-π, π]
-        for opt_angle in [optimal_angle_1, optimal_angle_2]:
-            while opt_angle > np.pi:
-                opt_angle -= 2 * np.pi
-            while opt_angle < -np.pi:
-                opt_angle += 2 * np.pi
+        while optimal_angle_1 > np.pi:
+            optimal_angle_1 -= 2 * np.pi
+        while optimal_angle_1 < -np.pi:
+            optimal_angle_1 += 2 * np.pi
+
+        while optimal_angle_2 > np.pi:
+            optimal_angle_2 -= 2 * np.pi
+        while optimal_angle_2 < -np.pi:
+            optimal_angle_2 += 2 * np.pi
 
         # Calculate angle difference helper
         def angle_diff(a, b):
@@ -512,26 +556,34 @@ class Surfer:
                 diff = 2 * np.pi - diff
             return diff
 
+        # Use surfer's yaw directly - no adjustment needed since angles are already in correct system
+        surfer_yaw_check = self.state.yaw
+        while surfer_yaw_check > np.pi:
+            surfer_yaw_check -= 2 * np.pi
+        while surfer_yaw_check < -np.pi:
+            surfer_yaw_check += 2 * np.pi
+
         # Check if within ±15° tolerance of EITHER optimal angle
-        angle_diff_1 = angle_diff(self.state.yaw, optimal_angle_1)
-        angle_diff_2 = angle_diff(self.state.yaw, optimal_angle_2)
+        angle_diff_1 = angle_diff(surfer_yaw_check, optimal_angle_1)
+        angle_diff_2 = angle_diff(surfer_yaw_check, optimal_angle_2)
 
         catch_tolerance = np.radians(15)  # ±15 degrees
+
+        # DEBUG
+        print(f"  BACKEND: opt1={np.degrees(optimal_angle_1):.0f}° opt2={np.degrees(optimal_angle_2):.0f}° yaw={np.degrees(surfer_yaw_check):.0f}° diff1={np.degrees(angle_diff_1):.1f}° diff2={np.degrees(angle_diff_2):.1f}°")
+
         if angle_diff_1 > catch_tolerance and angle_diff_2 > catch_tolerance:
+            print(f"  BACKEND: FAIL - angles too far off")
             return False  # Not at correct angle!
 
-        # Need to be moving (some speed)
-        surfer_speed = np.sqrt(self.state.vx**2 + self.state.vy**2)
-        if surfer_speed < 0.5:  # At least some movement
-            return False
+        # Speed requirement removed for testing - can catch stationary
 
-        # Success! Start being carried by wave
-        self.state.is_being_carried = True
+        # Success! Start surfing the wave
+        print(f"  BACKEND: SUCCESS - CAUGHT!")
+        self.state.is_surfing = True
         self.state.is_swimming = False
         self.state.wave_carry_timer = 0.0  # Reset timer
-
-        # Store required carry duration (depends on wave size!)
-        self.state.required_carry_duration = wave.get_carry_duration()
+        self.state.surfing_wave = wave  # Store reference to current wave being surfed
 
         return True
 

@@ -103,7 +103,8 @@ class WaveSimulator:
         pier_positions: List[Tuple[float, float]] = None,
         randomness: float = 0.2,
         breaking_depth_ratio: float = 1.3,
-        whitewash_duration: float = 5.0
+        whitewash_duration: float = 5.0,
+        straight_waves: bool = False
     ):
         """
         Initialize wave simulator.
@@ -119,12 +120,14 @@ class WaveSimulator:
             randomness: Wave height variation (0-1)
             breaking_depth_ratio: Wave breaks when height > depth * ratio
             whitewash_duration: Not used in simplified version
+            straight_waves: If True, all waves come straight (angle=0). If False, waves have random angles (-45 to +45).
         """
         self.ocean_floor = ocean_floor
         self.wave_period = wave_period
         self.base_height = base_height
         self.randomness = randomness
         self.breaking_depth_ratio = breaking_depth_ratio
+        self.straight_waves = straight_waves
 
         self.waves: List[Wave] = []
         self.time = 0.0
@@ -204,11 +207,14 @@ class WaveSimulator:
         max_height = self.base_height * np.random.uniform(0.5, 4.0)
         initial_height = max_height * 0.2
 
-        # Simple wave speed (20% faster)
-        speed = 2.4  # Fixed speed in m/s
+        # Simple wave speed (50% faster than before!)
+        speed = 3.6  # Fixed speed in m/s (was 2.4, now 50% faster)
 
-        # Random approach angle (-45° to +45°)
-        angle_degrees = np.random.uniform(-45, 45)
+        # Wave approach angle - toggle for straight vs. angled waves
+        if self.straight_waves:
+            angle_degrees = 0.0  # Always straight toward beach
+        else:
+            angle_degrees = np.random.uniform(-45, 45)  # Random approach angle (-45° to +45°)
         angle_radians = np.radians(angle_degrees)
 
         # Scale durations based on wave size
