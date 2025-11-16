@@ -148,7 +148,7 @@ class SurfRenderer:
                     pygame.draw.rect(self.screen, color, (0, y, self.width, 10))
 
     def _draw_waves(self, wave_simulator: WaveSimulator):
-        """Draw waves."""
+        """Draw waves - simple and clear."""
         for wave in wave_simulator.waves:
             wx, wy = wave.position
             sx, sy = self.world_to_screen(wx, wy)
@@ -156,31 +156,27 @@ class SurfRenderer:
             # Wave appearance depends on state
             if wave.is_whitewash:
                 color = self.COLORS['wave_breaking']
-                radius = int(wave.height * 3 * self.zoom)
+                radius = int(wave.height * 5 * self.zoom)
             elif wave.is_breaking:
-                color = self._interpolate_color(
-                    self.COLORS['wave'],
-                    self.COLORS['wave_breaking'],
-                    0.5
-                )
-                radius = int(wave.height * 2 * self.zoom)
+                color = (100, 255, 255)  # Bright cyan for breaking waves
+                radius = int(wave.height * 4 * self.zoom)
             else:
-                color = self.COLORS['wave']
-                radius = int(wave.height * 1.5 * self.zoom)
+                color = (50, 200, 255)  # Bright blue for building waves
+                radius = int(wave.height * 3 * self.zoom)
+
+            # Make radius bigger if too small
+            radius = max(radius, 15)
 
             if radius > 2:
-                pygame.draw.circle(self.screen, color, (sx, sy), radius, 2)
+                # Draw filled circle
+                pygame.draw.circle(self.screen, color, (sx, sy), radius)
 
-                # Draw wave direction
-                dx = np.cos(wave.direction) * radius
-                dy = np.sin(wave.direction) * radius
-                pygame.draw.line(
-                    self.screen,
-                    color,
-                    (sx, sy),
-                    (sx + int(dx), sy + int(dy)),
-                    2
-                )
+                # Draw outer ring for emphasis
+                pygame.draw.circle(self.screen, (255, 255, 255), (sx, sy), radius, 3)
+
+                # Draw inner core
+                inner_radius = max(radius // 3, 3)
+                pygame.draw.circle(self.screen, (255, 255, 255), (sx, sy), inner_radius)
 
     def _draw_jellyfish(self, jellyfish_swarm: JellyfishSwarm):
         """Draw jellyfish."""

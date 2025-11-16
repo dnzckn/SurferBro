@@ -134,7 +134,8 @@ class SurfEnvironment(gym.Env):
         # - Wave info (5 values): height, vx, vy, distance to nearest wave, wave is breaking
         # - Jellyfish info (3 values): dx, dy, distance
         # - Environment info (3 values): depth, distance to shore, in wave zone
-        obs_dim = 18 + 5 + 3 + 3
+        # - Angle info (3 values): angle_to_optimal, can_stand_up, nearest_wave_angle
+        obs_dim = 18 + 5 + 3 + 3 + 3  # Total: 32 dimensions
 
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -143,18 +144,64 @@ class SurfEnvironment(gym.Env):
             dtype=np.float32
         )
 
-        # Action space depends on current phase:
-        # Swimming: [swim_direction, swim_power, duck_dive]
-        # Wave catching: [roll, pitch, yaw, paddle]
-        # Surfing: [lean, turn]
-        # We use a unified action space: [action1, action2, action3, action4]
-        # Interpretation changes based on phase
+        # NEW 7D Action space for wave-catching mechanics:
+        # action[0] = swim_x       # -1 to 1 (left/right)
+        # action[1] = swim_y       # -1 to 1 (back/forward)
+        # action[2] = rotate       # -1 to 1 → convert to ±5° increments
+        # action[3] = duck_dive    # >0.5 triggers duck dive
+        # action[4] = stand_up     # >0.5 triggers stand up attempt
+        # action[5] = lean         # -1 to 1 (while surfing)
+        # action[6] = turn         # -1 to 1 (while surfing)
         self.action_space = spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(4,),
+            shape=(7,),
             dtype=np.float32
         )
+
+    def _calculate_optimal_angle(self, wave) -> float:
+        """
+        Calculate optimal surfer angle for catching wave.
+
+        According to wave-catching mechanics:
+        - Wave moves at wave.angle
+        - Optimal surfer angle = wave.angle + 45°
+
+        Args:
+            wave: Wave object
+
+        Returns:
+            Optimal surfer yaw angle in radians
+        """
+        if wave is None:
+            return 0.0
+
+        # Optimal angle is opposite wave direction + 45° (to ride WITH the wave)
+        optimal_angle = wave.angle + np.pi + np.pi / 4  # 180° + 45°
+
+        # Normalize to [-π, π]
+        while optimal_angle > np.pi:
+            optimal_angle -= 2 * np.pi
+        while optimal_angle < -np.pi:
+            optimal_angle += 2 * np.pi
+
+        return optimal_angle
+
+    def _calculate_angle_difference(self, angle1: float, angle2: float) -> float:
+        """
+        Calculate smallest difference between two angles.
+
+        Args:
+            angle1: First angle in radians
+            angle2: Second angle in radians
+
+        Returns:
+            Angle difference in radians (always positive, 0 to π)
+        """
+        diff = abs(angle1 - angle2)
+        if diff > np.pi:
+            diff = 2 * np.pi - diff
+        return diff
 
     def reset(
         self,
@@ -215,7 +262,7 @@ class SurfEnvironment(gym.Env):
         Execute one step in the environment.
 
         Args:
-            action: Action array [action1, action2, action3, action4]
+            action: Action array [swim_x, swim_y, rotate, duck_dive, stand_up, lean, turn]
 
         Returns:
             observation, reward, terminated, truncated, info
@@ -227,68 +274,62 @@ class SurfEnvironment(gym.Env):
         surfer_y = self.surfer.state.y
         surfer_z = self.surfer.state.z
 
+        # Parse 7D action space
+        swim_x = action[0]          # -1 to 1 (left/right)
+        swim_y = action[1]          # -1 to 1 (back/forward)
+        rotate = action[2]          # -1 to 1 (rotation in 5° increments)
+        duck_dive = action[3] > 0.5 # >0.5 triggers duck dive
+        stand_up = action[4] > 0.5  # >0.5 triggers stand up
+        lean = action[5]            # -1 to 1 (while surfing)
+        turn = action[6]            # -1 to 1 (while surfing)
+
+        # Apply rotation (5° increments) - works in all states
+        self.surfer.apply_rotation(rotate, self.dt)
+
         # Apply action based on current phase
         if self.surfer.state.is_swimming:
-            # Swimming phase: [direction, power, duck_dive_trigger, yaw_adjust]
-            swim_dir = action[0]
-            swim_power = (action[1] + 1) / 2  # Map from [-1,1] to [0,1]
-            duck_dive = action[2] > 0.0
-
-            self.surfer.apply_swimming_action(swim_dir, swim_power, duck_dive, self.dt)
+            # Swimming phase: use swim_x, swim_y for directional swimming
+            self.surfer.apply_swimming_action_2d(swim_x, swim_y, duck_dive, self.dt)
 
             # Check if trying to catch wave
             nearest_wave = self.wave_simulator.get_nearest_wave(surfer_x, surfer_y)
-            if nearest_wave and not nearest_wave.is_whitewash:
+            if nearest_wave and nearest_wave.is_breaking and not nearest_wave.is_whitewash:
                 dist_to_wave = np.linalg.norm(
                     nearest_wave.position - np.array([surfer_x, surfer_y])
                 )
-                if dist_to_wave < 5.0:  # Close enough to attempt
-                    # Apply board control for wave catching
-                    roll = action[0]
-                    pitch = action[1]
-                    yaw = action[2]
-                    paddle = (action[3] + 1) / 2
+                # Wave influence radius
+                wave_radius = 5.0
 
-                    self.surfer.apply_board_control(roll, pitch, yaw, paddle, self.dt)
-
-                    # Try to catch wave (pass wave object for 45° check!)
-                    if self.surfer.try_catch_wave(nearest_wave):
+                if dist_to_wave < wave_radius:
+                    # Try to catch wave with angle check!
+                    if self.surfer.try_catch_wave_angle(nearest_wave):
                         self.caught_wave = True
 
         elif self.surfer.state.is_being_carried:
-            # Being carried by wave: [turn, lean, stand_up_trigger, -]
-            turn = action[0]
-            lean = action[1]
-            stand_up_trigger = action[2] > 0.0
-
-            # Allow small adjustments while being carried
-            self.surfer.state.yaw += turn * self.dt * 1.0
-            self.surfer.state.roll += (lean * np.pi / 12 - self.surfer.state.roll) * self.dt * 2.0
+            # Being carried by wave: allow rotation and stand up attempt
+            # Rotation already applied above
 
             # Try to stand up if triggered
-            if stand_up_trigger:
+            if stand_up:
                 nearest_wave = self.wave_simulator.get_nearest_wave(surfer_x, surfer_y)
                 if nearest_wave:
-                    success, message = self.surfer.try_stand_up(nearest_wave.direction)
-                    if success:
-                        # Successfully stood up!
-                        pass  # Reward will be given in _calculate_reward
-                    else:
+                    # Calculate optimal angle for this wave
+                    optimal_angle = self._calculate_optimal_angle(nearest_wave)
+                    angle_diff = self._calculate_angle_difference(self.surfer.state.yaw, optimal_angle)
+
+                    # Try to stand up with angle check (±15° tolerance)
+                    success, message = self.surfer.try_stand_up_angle(nearest_wave, angle_diff)
+                    if not success:
                         # Crashed! Will be handled as wipeout
                         pass
 
         elif self.surfer.state.is_whitewash_carry:
-            # Being carried by whitewash: [-, -, duck_dive_trigger, -]
-            # Surfer can duck dive to escape whitewash carry!
-            duck_dive_trigger = action[2] > 0.0
-
-            # Apply swimming action to handle duck dive escape
-            self.surfer.apply_swimming_action(0.0, 0.0, duck_dive_trigger, self.dt)
+            # Being carried by whitewash: can duck dive to escape
+            if duck_dive:
+                self.surfer.apply_swimming_action_2d(0.0, 0.0, duck_dive, self.dt)
 
         elif self.surfer.state.is_surfing:
-            # Surfing phase: [lean, turn, -, -]
-            lean = action[0]
-            turn = action[1]
+            # Surfing phase: use lean and turn
             self.surfer.apply_surfing_control(lean, turn, self.dt)
             self.total_surf_time += self.dt
 
@@ -352,10 +393,10 @@ class SurfEnvironment(gym.Env):
         surfer_x = self.surfer.state.x
         surfer_y = self.surfer.state.y
 
-        # Surfer state
+        # Surfer state (18 values)
         surfer_obs = self.surfer.get_observation()
 
-        # Wave information
+        # Wave information (5 values)
         wave_height = self.wave_simulator.get_wave_height_at(surfer_x, surfer_y)
         wave_vx, wave_vy = self.wave_simulator.get_wave_velocity_at(surfer_x, surfer_y)
         nearest_wave = self.wave_simulator.get_nearest_wave(surfer_x, surfer_y)
@@ -371,10 +412,10 @@ class SurfEnvironment(gym.Env):
 
         wave_obs = np.array([wave_height, wave_vx, wave_vy, dist_to_wave, is_breaking])
 
-        # Jellyfish info
+        # Jellyfish info (3 values)
         jelly_obs = self.jellyfish_swarm.get_state_vector(surfer_x, surfer_y)
 
-        # Environment info
+        # Environment info (3 values)
         depth = self.ocean_floor.get_depth(surfer_x, surfer_y)
         ocean_width, ocean_height = self.ocean_floor.get_dimensions()
         dist_to_shore = surfer_y  # Distance from shore (y=0)
@@ -382,8 +423,35 @@ class SurfEnvironment(gym.Env):
 
         env_obs = np.array([depth, dist_to_shore, in_wave_zone])
 
-        # Concatenate all observations
-        observation = np.concatenate([surfer_obs, wave_obs, jelly_obs, env_obs])
+        # NEW: Angle information for wave-catching (3 values)
+        if nearest_wave:
+            # Calculate optimal angle for this wave (45° to wave direction)
+            optimal_angle = self._calculate_optimal_angle(nearest_wave)
+
+            # Angle difference from optimal (how far off surfer is)
+            angle_to_optimal = self._calculate_angle_difference(
+                self.surfer.state.yaw, optimal_angle
+            )
+
+            # Can stand up? (being carried + within ±15° + carried long enough)
+            catch_tolerance = np.radians(15)  # ±15 degrees
+            within_angle = angle_to_optimal < catch_tolerance
+            carried_enough = self.surfer.state.wave_carry_timer >= self.surfer.state.required_carry_duration
+            can_stand_up = float(
+                self.surfer.state.is_being_carried and within_angle and carried_enough
+            )
+
+            # Wave's approach angle
+            nearest_wave_angle = nearest_wave.angle
+        else:
+            angle_to_optimal = 0.0
+            can_stand_up = 0.0
+            nearest_wave_angle = 0.0
+
+        angle_obs = np.array([angle_to_optimal, can_stand_up, nearest_wave_angle])
+
+        # Concatenate all observations (18 + 5 + 3 + 3 + 3 = 32)
+        observation = np.concatenate([surfer_obs, wave_obs, jelly_obs, env_obs, angle_obs])
 
         return observation.astype(np.float32)
 
@@ -398,7 +466,25 @@ class SurfEnvironment(gym.Env):
         # Time penalty (encourages efficiency)
         reward += self.config.get('rewards.time_penalty')
 
-        # NEW: Reward for moving toward waves (forward progress)
+        # Get nearest wave for angle-based rewards
+        surfer_x = self.surfer.state.x
+        surfer_y = self.surfer.state.y
+        nearest_wave = self.wave_simulator.get_nearest_wave(surfer_x, surfer_y)
+
+        # NEW: Angle-based positioning rewards
+        if nearest_wave and (self.surfer.state.is_swimming or self.surfer.state.is_being_carried):
+            optimal_angle = self._calculate_optimal_angle(nearest_wave)
+            angle_diff = self._calculate_angle_difference(self.surfer.state.yaw, optimal_angle)
+
+            # Reward for correct angle (±15°)
+            if angle_diff < np.radians(15):
+                reward += 0.5 * self.dt  # Continuous feedback
+
+            # Perfect angle bonus (±5°)
+            if angle_diff < np.radians(5):
+                reward += 1.0 * self.dt  # Extra bonus for precision
+
+        # Reward for moving toward waves (forward progress)
         if self.surfer.state.is_swimming and not self.surfer.state.is_duck_diving:
             # Reward for velocity in +Y direction (toward waves)
             if self.surfer.state.vy > 0:
@@ -409,32 +495,32 @@ class SurfEnvironment(gym.Env):
             reward += self.config.get('rewards.reach_wave_zone')
             self.reached_wave_zone = False  # Only reward once
 
-        # Reward for catching wave (starting to be carried)
+        # BIG reward for catching wave (starting to be carried)
         if self.caught_wave:
-            reward += self.config.get('rewards.wave_catch_success')
+            reward += 50.0  # Big one-time reward!
             self.caught_wave = False
 
         # Reward for being carried (learning to wait before standing)
         if self.surfer.state.is_being_carried:
             reward += 0.5 * self.dt  # Small reward for being patient
 
-        # Reward for surfing (after successfully standing up)
+        # BIG reward for surfing (after successfully standing up)
         if self.surfer.state.is_surfing:
-            reward += self.config.get('rewards.surfing_per_second') * self.dt
+            reward += 10.0 * self.dt  # 10 points per second of surfing!
 
         # Duck dive success (avoiding wave pushback)
         if self.surfer.state.is_duck_diving and near_wave:
             # Reward for being underwater when wave is near (smart timing!)
             reward += self.config.get('rewards.duck_dive_success') * self.dt
 
-        # NEW: Reward for escaping whitewash via duck dive
+        # Reward for escaping whitewash via duck dive
         if self.surfer.state.is_duck_diving and not self.surfer.state.is_whitewash_carry:
             # Small reward for using duck dive effectively
             reward += 1.0 * self.dt
 
         # Penalty for being stuck in whitewash (encourages escape)
         if self.surfer.state.is_whitewash_carry:
-            reward -= 2.0 * self.dt
+            reward -= 2.0 * self.dt  # Continuous penalty
 
         # Bonus for distance traveled while surfing
         if self.surfer.state.is_surfing:

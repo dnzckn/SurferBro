@@ -9,25 +9,28 @@ from surferbro.physics.ocean_floor import OceanFloor
 from enum import Enum
 
 class WavePhase(Enum):
-    """Wave lifecycle phases - SIMPLIFIED to just 2 phases!"""
+    """Wave lifecycle phases - now with whitewash!"""
     BUILDING = "building"    # Wave is forming, growing
     BREAKING = "breaking"    # Wave is breaking, rideable!
+    WHITEWASH = "whitewash"  # Wave has crashed, foamy mess!
 
 @dataclass
 class Wave:
-    """Represents a simple circular wave moving toward shore."""
+    """Represents a wave moving toward shore at an angle."""
     x: float  # X position (center of wave)
     y: float  # Y position (center of wave)
     height: float  # Current wave height in meters
     max_height: float  # Maximum height this wave will reach
     speed: float  # Wave speed in m/s
     period: float  # Wave period in seconds
+    angle: float = 0.0  # Approach angle in radians (-45° to +45°)
     phase: WavePhase = WavePhase.BUILDING
     phase_timer: float = 0.0  # Time in current phase
 
     # Phase durations
     building_duration: float = 2.0  # 2s to build
     breaking_duration: float = 5.0  # 5s rideable window
+    whitewash_duration: float = 10.0  # 10s of whitewash foam!
 
     def get_carry_duration(self) -> float:
         """
@@ -78,8 +81,8 @@ class Wave:
 
     @property
     def is_whitewash(self) -> bool:
-        """Compatibility property - no whitewash in simplified version."""
-        return False
+        """Check if wave is in whitewash phase."""
+        return self.phase == WavePhase.WHITEWASH
 
 
 class WaveSimulator:
@@ -125,10 +128,13 @@ class WaveSimulator:
 
         self.waves: List[Wave] = []
         self.time = 0.0
-        self.last_wave_spawn = 0.0
+        self.last_wave_spawn = -wave_period  # Negative so first wave spawns immediately
 
         # AUTO-DETECT beach location (simplified)
         self._detect_beach_location()
+
+        # Spawn initial wave
+        self._spawn_wave()
 
     def _detect_beach_location(self):
         """
@@ -145,15 +151,15 @@ class WaveSimulator:
 
         # Determine which end is the beach (shallower)
         if depth_at_bottom < depth_at_top:
-            # Beach at bottom - waves spawn at top, move down
-            self.spawn_y_ratio = 0.75
+            # Beach at bottom - waves spawn from deep water at top, move down
+            self.spawn_y_ratio = 0.95  # Spawn at 95% (very deep water)
             self.move_direction = -1  # Move toward y=0
-            print(f"🏖️  Beach at BOTTOM - waves move DOWN")
+            print(f"🏖️  Beach at BOTTOM - waves spawn from DEEP WATER at top")
         else:
-            # Beach at top - waves spawn at bottom, move up
-            self.spawn_y_ratio = 0.25
+            # Beach at top - waves spawn from deep water at bottom, move up
+            self.spawn_y_ratio = 0.05  # Spawn at 5% (very deep water)
             self.move_direction = 1  # Move toward y=max
-            print(f"🏖️  Beach at TOP - waves move UP")
+            print(f"🏖️  Beach at TOP - waves spawn from DEEP WATER at bottom")
 
     def step(self, dt: float):
         """
@@ -174,9 +180,12 @@ class WaveSimulator:
         for wave in self.waves:
             self._update_wave(wave, dt)
 
-            # Remove waves that reached shore or decayed
+            # Remove waves only when they reach the beach!
             ocean_width, ocean_height = self.ocean_floor.get_dimensions()
-            if wave.y <= 0 or wave.y >= ocean_height or wave.height < 0.1:
+            depth = self.ocean_floor.get_depth(wave.x, wave.y)
+
+            # Remove if: off screen OR reached beach (very shallow water)
+            if wave.y <= 0 or wave.y >= ocean_height or depth < 0.5:
                 waves_to_remove.append(wave)
 
         # Clean up finished waves
@@ -184,19 +193,32 @@ class WaveSimulator:
             self.waves.remove(wave)
 
     def _spawn_wave(self):
-        """SIMPLIFIED: Spawn a new circular wave from deep water."""
+        """Spawn a wave with varying size - bigger waves last longer!"""
         ocean_width, ocean_height = self.ocean_floor.get_dimensions()
 
         # Spawn at center X, deep water Y
         spawn_x = ocean_width / 2
         spawn_y = ocean_height * self.spawn_y_ratio
 
-        # Max height with small random variation
-        max_height = self.base_height * (1 + np.random.uniform(-self.randomness, self.randomness))
+        # Max height with HUGE variation (0.75m to 6m waves!)
+        max_height = self.base_height * np.random.uniform(0.5, 4.0)
         initial_height = max_height * 0.2
 
-        # Simple wave speed
-        speed = 2.0  # Fixed speed in m/s - simple!
+        # Simple wave speed (20% faster)
+        speed = 2.4  # Fixed speed in m/s
+
+        # Random approach angle (-45° to +45°)
+        angle_degrees = np.random.uniform(-45, 45)
+        angle_radians = np.radians(angle_degrees)
+
+        # Scale durations based on wave size
+        # Small waves: shorter phases
+        # Big waves: longer phases
+        size_ratio = max_height / self.base_height  # 0.5 to 4.0
+
+        building_duration = 2.0 * size_ratio  # 1s to 8s
+        breaking_duration = 5.0 * size_ratio  # 2.5s to 20s
+        whitewash_duration = 10.0 * size_ratio  # 5s to 40s
 
         wave = Wave(
             x=spawn_x,
@@ -205,15 +227,19 @@ class WaveSimulator:
             max_height=max_height,
             speed=speed,
             period=self.wave_period,
+            angle=angle_radians,
             phase=WavePhase.BUILDING,
-            phase_timer=0.0
+            phase_timer=0.0,
+            building_duration=building_duration,
+            breaking_duration=breaking_duration,
+            whitewash_duration=whitewash_duration
         )
 
         self.waves.append(wave)
-        print(f"🌊 New wave spawned at ({spawn_x:.1f}, {spawn_y:.1f})")
+        print(f"🌊 New wave: {max_height:.1f}m at {angle_degrees:.0f}° (break={breaking_duration:.1f}s, whitewash={whitewash_duration:.1f}s)")
 
     def _update_wave(self, wave: Wave, dt: float):
-        """SIMPLIFIED: Update wave through 2 simple phases."""
+        """Update wave through 3 phases: building, breaking, whitewash."""
         wave.phase_timer += dt
 
         # Phase 1: BUILDING - wave grows
@@ -229,18 +255,28 @@ class WaveSimulator:
                 wave.height = wave.max_height
                 print(f"🌊 Wave at ({wave.x:.1f}, {wave.y:.1f}) is now BREAKING!")
 
-        # Phase 2: BREAKING - wave is rideable, then decays
+        # Phase 2: BREAKING - wave is rideable
         elif wave.phase == WavePhase.BREAKING:
-            # Check if we should start decaying
             depth = self.ocean_floor.get_depth(wave.x, wave.y)
 
-            # After some time or in shallow water, start to decay
+            # Transition to WHITEWASH after duration or in shallow water
             if wave.phase_timer > wave.breaking_duration or \
                (depth > 0 and wave.height > depth * self.breaking_depth_ratio):
-                wave.height *= 0.95  # Decay
+                wave.phase = WavePhase.WHITEWASH
+                wave.phase_timer = 0.0
+                wave.height *= 0.7  # Reduce height when it crashes
+                print(f"💥 Wave at ({wave.x:.1f}, {wave.y:.1f}) crashed into WHITEWASH!")
 
-        # Move wave toward shore (simple Y movement!)
-        wave.y += self.move_direction * wave.speed * dt
+        # Phase 3: WHITEWASH - foamy mess that slowly decays
+        elif wave.phase == WavePhase.WHITEWASH:
+            # Slowly decay whitewash
+            wave.height *= 0.98  # Very slow decay
+
+        # Move wave toward shore at an angle!
+        # Y component always toward beach
+        wave.y += self.move_direction * wave.speed * dt * np.cos(wave.angle)
+        # X component based on angle (positive = right, negative = left)
+        wave.x += wave.speed * dt * np.sin(wave.angle)
 
     def get_wave_height_at(self, x: float, y: float, current_time: float = None) -> float:
         """
@@ -310,8 +346,11 @@ class WaveSimulator:
 
                 v = v_strength * influence
 
-                # Velocity pushes toward shore (simple Y direction!)
-                vy += self.move_direction * v
+                # Velocity pushes at wave's angle! (so surfer gets carried with wave)
+                # X component based on wave angle
+                vx += np.sin(wave.angle) * v
+                # Y component toward shore, scaled by angle
+                vy += self.move_direction * np.cos(wave.angle) * v
 
         return vx, vy
 

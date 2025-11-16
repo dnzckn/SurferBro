@@ -89,6 +89,115 @@ class Surfer:
             is_on_board=True
         )
 
+    def apply_rotation(self, rotate_action: float, dt: float):
+        """
+        Apply rotation in 5° increments.
+
+        Args:
+            rotate_action: Rotation input (-1 to 1)
+            dt: Time step
+        """
+        # Deadzone to prevent unintentional rotation
+        if abs(rotate_action) > 0.3:
+            # Rotation direction
+            direction = 1 if rotate_action > 0 else -1
+
+            # Apply 6.5° rotation increment (30% faster)
+            self.state.yaw += direction * np.radians(6.5) * dt * 10.0  # Scale by dt for smooth rotation
+
+            # Normalize yaw to [-π, π] (equivalent to 0-360°)
+            while self.state.yaw > np.pi:
+                self.state.yaw -= 2 * np.pi
+            while self.state.yaw < -np.pi:
+                self.state.yaw += 2 * np.pi
+
+    def apply_swimming_action_2d(
+        self,
+        swim_x: float,
+        swim_y: float,
+        duck_dive_trigger: bool,
+        dt: float
+    ):
+        """
+        Apply 2D swimming controls with independent X/Y movement.
+
+        IMPORTANT: Can't swim and duck dive at same time!
+        Duck dive lasts 3 seconds and prevents movement.
+
+        NEW: Can duck dive while in whitewash_carry to escape!
+
+        Args:
+            swim_x: Horizontal swim input (-1 to 1, left/right)
+            swim_y: Vertical swim input (-1 to 1, back/forward)
+            duck_dive_trigger: Trigger to START a duck dive
+            dt: Time step
+        """
+        # Special case: Duck dive to escape whitewash carry!
+        if self.state.is_whitewash_carry and duck_dive_trigger:
+            self.state.is_whitewash_carry = False
+            self.state.is_swimming = True
+            self.state.is_duck_diving = True
+            self.state.duck_dive_timer = self.state.duck_dive_duration
+            self.state.has_wiped_out = False  # Reset wipeout flag
+            return
+
+        if not self.state.is_swimming:
+            return
+
+        # Update duck dive timer
+        if self.state.duck_dive_timer > 0:
+            self.state.duck_dive_timer -= dt
+            self.state.is_duck_diving = True
+        else:
+            self.state.is_duck_diving = False
+
+        # Trigger new duck dive (only if not already diving)
+        if duck_dive_trigger and self.state.duck_dive_timer <= 0:
+            self.state.duck_dive_timer = self.state.duck_dive_duration
+            self.state.is_duck_diving = True
+
+        # DUCK DIVING: Can't swim! Stay underwater, no horizontal movement
+        if self.state.is_duck_diving:
+            # Apply strong drag to slow down
+            self.state.vx *= 0.5
+            self.state.vy *= 0.5
+
+            # Dive underwater
+            target_depth = -self.duck_dive_depth
+            if self.state.z > target_depth:
+                self.state.vz = -2.0  # Dive down fast
+            else:
+                self.state.vz = 0.0  # Stay at depth
+
+        # SWIMMING: Can move in 2D!
+        else:
+            # Calculate swim direction from inputs
+            # swim_x: -1 = left, +1 = right (relative to surfer's orientation)
+            # swim_y: -1 = back, +1 = forward (relative to surfer's orientation)
+
+            # Convert to world coordinates based on surfer's yaw
+            forward_x = np.cos(self.state.yaw)
+            forward_y = np.sin(self.state.yaw)
+            right_x = -np.sin(self.state.yaw)
+            right_y = np.cos(self.state.yaw)
+
+            # Combine movements
+            swim_power = np.sqrt(swim_x**2 + swim_y**2)
+            swim_power = min(swim_power, 1.0)  # Clamp to max speed
+
+            # Calculate velocity
+            speed = swim_power * self.swim_speed
+
+            # Apply movement
+            self.state.vx = speed * (forward_x * swim_y + right_x * swim_x)
+            self.state.vy = speed * (forward_y * swim_y + right_y * swim_x)
+
+            # Buoyancy brings back to surface
+            if self.state.z < 0:
+                self.state.vz = 1.0  # Surface quickly
+            else:
+                self.state.vz = 0.0
+
     def apply_swimming_action(
         self,
         swim_direction: float,
@@ -97,7 +206,7 @@ class Surfer:
         dt: float
     ):
         """
-        Apply swimming controls.
+        Apply swimming controls (LEGACY - kept for compatibility).
 
         IMPORTANT: Can't swim and duck dive at same time!
         Duck dive lasts 3 seconds and prevents movement.
@@ -362,12 +471,76 @@ class Surfer:
         self.state.is_whitewash_carry = True
         self.state.on_board = True  # Still on board, just tumbling
 
+    def try_catch_wave_angle(
+        self,
+        wave  # Wave object from wave_simulator
+    ) -> bool:
+        """
+        Attempt to catch a wave with 45° angle mechanics.
+
+        NEW WAVE-CATCHING MECHANICS:
+        - Optimal angle: wave.angle + 45°
+        - Tolerance: ±15° from optimal angle
+        - Must be close to wave and moving toward it
+
+        Args:
+            wave: Wave object with angle and speed
+
+        Returns:
+            True if wave caught successfully (starts carrying phase)
+        """
+        if self.state.is_surfing or self.state.is_being_carried or not self.state.is_swimming:
+            return False
+
+        # Calculate TWO optimal angles (can ride left OR right along wave face)
+        # Angle 1: opposite direction + 45°
+        optimal_angle_1 = wave.angle + np.pi + np.pi / 4  # 180° + 45°
+        # Angle 2: opposite direction - 45°
+        optimal_angle_2 = wave.angle + np.pi - np.pi / 4  # 180° - 45°
+
+        # Normalize both angles to [-π, π]
+        for opt_angle in [optimal_angle_1, optimal_angle_2]:
+            while opt_angle > np.pi:
+                opt_angle -= 2 * np.pi
+            while opt_angle < -np.pi:
+                opt_angle += 2 * np.pi
+
+        # Calculate angle difference helper
+        def angle_diff(a, b):
+            diff = abs(a - b)
+            if diff > np.pi:
+                diff = 2 * np.pi - diff
+            return diff
+
+        # Check if within ±15° tolerance of EITHER optimal angle
+        angle_diff_1 = angle_diff(self.state.yaw, optimal_angle_1)
+        angle_diff_2 = angle_diff(self.state.yaw, optimal_angle_2)
+
+        catch_tolerance = np.radians(15)  # ±15 degrees
+        if angle_diff_1 > catch_tolerance and angle_diff_2 > catch_tolerance:
+            return False  # Not at correct angle!
+
+        # Need to be moving (some speed)
+        surfer_speed = np.sqrt(self.state.vx**2 + self.state.vy**2)
+        if surfer_speed < 0.5:  # At least some movement
+            return False
+
+        # Success! Start being carried by wave
+        self.state.is_being_carried = True
+        self.state.is_swimming = False
+        self.state.wave_carry_timer = 0.0  # Reset timer
+
+        # Store required carry duration (depends on wave size!)
+        self.state.required_carry_duration = wave.get_carry_duration()
+
+        return True
+
     def try_catch_wave(
         self,
         wave  # Wave object from wave_simulator
     ) -> bool:
         """
-        Attempt to catch a wave and start being carried.
+        Attempt to catch a wave and start being carried (LEGACY).
 
         REAL SURFING TECHNIQUE:
         - Must paddle at 45° angle to wave front (perpendicular)
@@ -422,12 +595,53 @@ class Surfer:
 
         return True
 
+    def try_stand_up_angle(
+        self,
+        wave,  # Wave object
+        angle_diff: float
+    ) -> Tuple[bool, str]:
+        """
+        Attempt to stand up with angle-based mechanics.
+
+        NEW STAND-UP MECHANICS:
+        - Must be carried for required duration (wave-size dependent)
+        - Must be within ±15° of optimal angle
+        - Angle is already calculated by caller
+
+        Args:
+            wave: Wave object
+            angle_diff: Pre-calculated angle difference from optimal
+
+        Returns:
+            (success, message): True if successfully stood up, with reason message
+        """
+        if not self.state.is_being_carried:
+            return False, "Not being carried by wave"
+
+        # Check if carried long enough (duration depends on wave size!)
+        if self.state.wave_carry_timer < self.state.required_carry_duration:
+            # CRASH: Stood up too early!
+            self._start_whitewash_carry()
+            return False, f"Crashed: stood up too early ({self.state.wave_carry_timer:.2f}s < {self.state.required_carry_duration:.2f}s)"
+
+        # Check angle tolerance (±15°)
+        stand_up_tolerance = np.radians(15)  # ±15 degrees
+        if angle_diff > stand_up_tolerance:
+            # CRASH: Not at correct angle!
+            self._start_whitewash_carry()
+            return False, f"Crashed: wrong angle ({np.degrees(angle_diff):.1f}° off, need <15°)"
+
+        # SUCCESS! Stand up and start surfing
+        self.state.is_being_carried = False
+        self.state.is_surfing = True
+        return True, "Successfully stood up!"
+
     def try_stand_up(
         self,
         wave_direction: float
     ) -> Tuple[bool, str]:
         """
-        Attempt to stand up and start surfing.
+        Attempt to stand up and start surfing (LEGACY).
 
         Must be carried for at least 1 second and match wave direction.
 
