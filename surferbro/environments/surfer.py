@@ -47,6 +47,7 @@ class SurferState:
 
     # Current wave being surfed (for surfing state)
     surfing_wave: object = None  # Wave object reference
+    surfing_progress: float = 0.5  # Position along wave curve (0.0 to 1.0)
 
 
 class Surfer:
@@ -406,29 +407,26 @@ class Surfer:
             self.state.z = wave_height + 0.1
 
         elif self.state.is_surfing:
-            # Riding the wave (actively surfing on the wave face!)
-            # Attach surfer to the TOP of the wave for clear visual feedback
-            self.state.z = wave_height + 0.5  # On top of the wave!
-
+            # Riding the wave - attached to the wave curve!
             # Auto-exit surfing when wave becomes whitewash
             if self.state.surfing_wave and self.state.surfing_wave.is_whitewash:
                 self.state.is_surfing = False
                 self.state.is_swimming = True
                 self.state.surfing_wave = None
             else:
-                # Surfer controls left/right movement along wave face (5x speed!)
-                # Wave provides forward momentum at 1x base speed, surfer moves left/right at 5x
-                wave_speed_x = wave_velocity[0]  # Wave forward push
-                wave_speed_y = wave_velocity[1]  # Wave forward push
+                # Position surfer at the correct point on the wave curve based on surfing_progress
+                # Movement (from user input via vx/vy in play_manual.py) changes the progress along the curve
+                point_x, point_y = self.get_wave_curve_point(self.state.surfing_wave, self.state.surfing_progress)
+                self.state.x = point_x
+                self.state.y = point_y
 
-                # Add surfer's left/right movement (perpendicular to wave direction)
-                # Allow W/S and A/D controls at high speed
-                surfer_leftright_speed = 5.4 * 5.0  # 5x the normal speed for left/right
-                surfer_leftright = self.state.vx * 0.01  # Get intended lateral direction
+                # Always on top of the wave
+                self.state.z = wave_height + 0.5
 
-                # Total movement = wave push + surfer's left/right control
-                self.state.vx = wave_speed_x + surfer_leftright
-                self.state.vy = wave_speed_y
+                # Zero out vx/vy since position is managed by surfing_progress
+                # This will be updated by play_manual.py's movement controls
+                self.state.vx = 0
+                self.state.vy = 0
 
         elif self.state.is_whitewash_carry:
             # Being carried by whitewash after crash
@@ -502,6 +500,62 @@ class Surfer:
         self.state.is_whitewash_carry = True
         self.state.on_board = True  # Still on board, just tumbling
 
+    def get_wave_curve_point(self, wave, progress: float) -> Tuple[float, float]:
+        """
+        Calculate a point on the wave's curve.
+
+        Args:
+            wave: Wave object
+            progress: Position along wave (0.0 to 1.0)
+
+        Returns:
+            (x, y) world coordinates of that point on the curve
+        """
+        # Match the wave curve calculation from play_manual.py
+        wave_length = 200.0  # Fixed wave length in world units
+        wave_height = wave.height * 6.0  # Scale factor for visualization
+
+        t = (progress - 0.5) * wave_length
+        curve = np.sin(progress * np.pi)
+
+        local_x = t
+        local_y = -curve * wave_height
+
+        # Rotate by wave angle
+        rotated_x = local_x * np.cos(wave.angle) - local_y * np.sin(wave.angle)
+        rotated_y = local_x * np.sin(wave.angle) + local_y * np.cos(wave.angle)
+
+        # Translate to wave position
+        world_x = wave.x + rotated_x
+        world_y = wave.y + rotated_y
+
+        return (world_x, world_y)
+
+    def find_nearest_curve_point(self, wave) -> float:
+        """
+        Find the nearest point on the wave curve to the surfer.
+
+        Args:
+            wave: Wave object
+
+        Returns:
+            progress: Position along curve (0.0 to 1.0) of nearest point
+        """
+        best_progress = 0.5
+        best_distance = float('inf')
+
+        # Sample the curve at 20 points to find closest
+        for i in range(21):
+            progress = i / 20.0
+            point_x, point_y = self.get_wave_curve_point(wave, progress)
+
+            dist = np.sqrt((point_x - self.state.x)**2 + (point_y - self.state.y)**2)
+            if dist < best_distance:
+                best_distance = dist
+                best_progress = progress
+
+        return best_progress
+
     def try_catch_wave_angle(
         self,
         wave  # Wave object from wave_simulator
@@ -549,19 +603,28 @@ class Surfer:
         while optimal_angle_2 < -np.pi:
             optimal_angle_2 += 2 * np.pi
 
-        # Calculate angle difference helper
+        # Calculate angle difference helper - normalized properly
         def angle_diff(a, b):
-            diff = abs(a - b)
+            # Normalize both angles to [-π, π]
+            a_norm = a
+            b_norm = b
+            while a_norm > np.pi:
+                a_norm -= 2 * np.pi
+            while a_norm < -np.pi:
+                a_norm += 2 * np.pi
+            while b_norm > np.pi:
+                b_norm -= 2 * np.pi
+            while b_norm < -np.pi:
+                b_norm += 2 * np.pi
+
+            # Calculate shortest angular distance
+            diff = abs(a_norm - b_norm)
             if diff > np.pi:
                 diff = 2 * np.pi - diff
             return diff
 
         # Use surfer's yaw directly - no adjustment needed since angles are already in correct system
         surfer_yaw_check = self.state.yaw
-        while surfer_yaw_check > np.pi:
-            surfer_yaw_check -= 2 * np.pi
-        while surfer_yaw_check < -np.pi:
-            surfer_yaw_check += 2 * np.pi
 
         # Check if within ±15° tolerance of EITHER optimal angle
         angle_diff_1 = angle_diff(surfer_yaw_check, optimal_angle_1)
@@ -569,11 +632,13 @@ class Surfer:
 
         catch_tolerance = np.radians(15)  # ±15 degrees
 
-        # DEBUG
-        print(f"  BACKEND: opt1={np.degrees(optimal_angle_1):.0f}° opt2={np.degrees(optimal_angle_2):.0f}° yaw={np.degrees(surfer_yaw_check):.0f}° diff1={np.degrees(angle_diff_1):.1f}° diff2={np.degrees(angle_diff_2):.1f}°")
+        # DEBUG - show which angle succeeded
+        within_tolerance_1 = angle_diff_1 <= catch_tolerance
+        within_tolerance_2 = angle_diff_2 <= catch_tolerance
+        print(f"  BACKEND: yaw={np.degrees(surfer_yaw_check):.0f}° | opt1={np.degrees(optimal_angle_1):.0f}° (diff={np.degrees(angle_diff_1):.1f}° {'✓' if within_tolerance_1 else '✗'}) | opt2={np.degrees(optimal_angle_2):.0f}° (diff={np.degrees(angle_diff_2):.1f}° {'✓' if within_tolerance_2 else '✗'})")
 
         if angle_diff_1 > catch_tolerance and angle_diff_2 > catch_tolerance:
-            print(f"  BACKEND: FAIL - angles too far off")
+            print(f"  BACKEND: FAIL - angles too far off (both angles exceed {np.degrees(catch_tolerance):.0f}° tolerance)")
             return False  # Not at correct angle!
 
         # Speed requirement removed for testing - can catch stationary
@@ -584,6 +649,14 @@ class Surfer:
         self.state.is_swimming = False
         self.state.wave_carry_timer = 0.0  # Reset timer
         self.state.surfing_wave = wave  # Store reference to current wave being surfed
+
+        # Attach surfer to nearest point on the wave curve
+        progress = self.find_nearest_curve_point(wave)
+        self.state.surfing_progress = progress
+        point_x, point_y = self.get_wave_curve_point(wave, progress)
+        self.state.x = point_x
+        self.state.y = point_y
+        print(f"  BACKEND: Attached to wave curve at progress={progress:.2f}")
 
         return True
 

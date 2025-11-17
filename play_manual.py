@@ -75,9 +75,10 @@ zoom_y = HEIGHT / ocean_height
 zoom = min(zoom_x, zoom_y) * 0.9
 
 def world_to_screen(x, y):
-    """Convert world coordinates to screen coordinates."""
-    sx = int(x * zoom)
-    sy = int(y * zoom)
+    """Convert world coordinates to screen coordinates (centered on screen)."""
+    # Center the world view on screen
+    sx = int(WIDTH / 2 + (x - ocean_width / 2) * zoom)
+    sy = int(HEIGHT / 2 + (y - ocean_height / 2) * zoom)
     return sx, sy
 
 # Colors
@@ -172,17 +173,34 @@ while running:
 
         # Apply ABSOLUTE movement (not relative to rotation)
         # Directly set velocity in world coordinates
-        if swim_x != 0 or swim_y != 0:
+
+        # When SURFING: move along the wave curve instead of free movement!
+        if surfer.state.is_surfing and forward_back != 0:
+            # Convert W/S input to movement along the wave curve (progress 0.0 to 1.0)
+            # W = move toward end (progress increases), S = move toward start (progress decreases)
+            progress_speed = 0.5 * dt * 5.0  # 5x speed! (0.5 per second = full traverse in 2 seconds)
+
+            # Forward input (W) increases progress, backward (S) decreases it
+            old_progress = surfer.state.surfing_progress
+            surfer.state.surfing_progress += forward_back * progress_speed
+
+            # Clamp progress to [0.1, 0.9] to avoid edges
+            surfer.state.surfing_progress = np.clip(surfer.state.surfing_progress, 0.1, 0.9)
+
+            # Debug: show when surfing and moving
+            if abs(surfer.state.surfing_progress - old_progress) > 0.001:
+                print(f"  🏄 Surfing: progress={surfer.state.surfing_progress:.2f} (moved {surfer.state.surfing_progress - old_progress:+.3f})")
+
+            # Position is updated in update_physics based on surfing_progress
+            # Set vx/vy to zero - position is managed by physics
+            surfer.state.vx = 0
+            surfer.state.vy = 0
+        elif swim_x != 0 or swim_y != 0:
             swim_power = np.sqrt(swim_x**2 + swim_y**2)
             swim_power = min(swim_power, 1.0)
 
-            # When SURFING: 5x speed for moving along the wave!
-            # When swimming: normal speed
-            if surfer.state.is_surfing:
-                base_speed = swim_power * surfer.swim_speed * 5.0  # 5x speed while surfing!
-            else:
-                base_speed = swim_power * surfer.swim_speed
-
+            # Normal swimming movement (not surfing)
+            # Normal swimming movement
             # Calculate movement direction
             movement_angle = np.arctan2(swim_y, swim_x)
 
@@ -200,6 +218,7 @@ while running:
             # cos(π/2) = 0.0 (perpendicular) → 100% speed
             # cos(π) = -1.0 (opposite) → 0% speed
             speed_multiplier = 1.0 + 1.0 * np.cos(angle_diff)
+            base_speed = swim_power * surfer.swim_speed
             speed = base_speed * speed_multiplier
 
             # Direct world-space movement
@@ -222,6 +241,7 @@ while running:
                 surfer.state.is_surfing = False
                 surfer.state.is_swimming = True
                 surfer.state.surfing_wave = None
+                surfer.state.surfing_progress = 0.5  # Reset to middle
                 print(f"🏄 Exited wave by duck diving!")
 
         # Update duck dive timer
@@ -513,10 +533,50 @@ while running:
             face_angle_2 += 2 * np.pi
 
         # Draw BOTH green arrows showing where surfer should face
-        for face_angle in [face_angle_1, face_angle_2]:
+        # Also show which one is catchable (bright vs dimmed)
+        surfer_yaw = surfer.state.yaw
+
+        def angle_diff_visual(a, b):
+            # Normalize both angles to [-π, π]
+            a_norm = a
+            b_norm = b
+            while a_norm > np.pi:
+                a_norm -= 2 * np.pi
+            while a_norm < -np.pi:
+                a_norm += 2 * np.pi
+            while b_norm > np.pi:
+                b_norm -= 2 * np.pi
+            while b_norm < -np.pi:
+                b_norm += 2 * np.pi
+            # Calculate shortest angular distance
+            diff = abs(a_norm - b_norm)
+            if diff > np.pi:
+                diff = 2 * np.pi - diff
+            return diff
+
+        catch_tolerance_deg = 15
+        catch_tolerance_rad = np.radians(catch_tolerance_deg)
+
+        for i, face_angle in enumerate([face_angle_1, face_angle_2]):
+            diff = angle_diff_visual(surfer_yaw, face_angle)
+            is_catchable = diff <= catch_tolerance_rad
+
             dx = np.cos(face_angle) * surfer_radius * 5
             dy = np.sin(face_angle) * surfer_radius * 5
-            pygame.draw.line(screen, (0, 255, 0), (sx, sy), (sx + int(dx), sy + int(dy)), 4)
+
+            # Bright green if catchable, dim if not
+            arrow_color = (0, 255, 0) if is_catchable else (0, 100, 0)
+            arrow_width = 5 if is_catchable else 2
+
+            pygame.draw.line(screen, arrow_color, (sx, sy), (sx + int(dx), sy + int(dy)), arrow_width)
+
+            # Label which is which
+            label_x = sx + int(dx) * 0.6
+            label_y = sy + int(dy) * 0.6
+            angle_deg = (np.degrees(face_angle) % 360)
+            label_text = f"{'R' if i == 0 else 'L'} {angle_deg:.0f}°"  # Show angle
+            label_surface = font.render(label_text, True, arrow_color)
+            screen.blit(label_surface, (int(label_x), int(label_y)))
 
     # Status text
     if is_attempting_catch:
